@@ -1091,11 +1091,3 @@ medscribe/
 
 ---
 
-## Questions for Clarification
-
-Before switching to Code mode, please confirm:
-
-1. **Is this architecture aligned with your vision?**
-2. **Should I proceed with Phase 1 implementation (basic pipeline)?**
-3. **Any changes to the tech stack or design decisions?**
-4. **Do you want me to start with backend setup or create all documentation first?**
