@@ -65,4 +65,8 @@ htmlcov/
 
 # Made with Bob
 
-*.md
+# Ignore only Bob task logs
+bob_task_may-14-2026_1-45-43-pm.md
+bob_task_may-14-2026_11-06-30-am.md
+bob_task_may-14-2026_11-48-06-am.md
+
