@@ -1,0 +1,26 @@
+{
+  "total_consultations": 6,
+  "successful_completions": 5,
+  "pipeline_failures": {
+    "'dict' object has no attribute 'dict'": 1
+  },
+  "average_processing_time": 79.58148713906606,
+  "diarization_method_used": {
+    "pyannote": 0,
+    "speechbrain": 0,
+    "fallback": 5
+  },
+  "confidence_distribution": {
+    "above_085": 5,
+    "between_070_085": 0,
+    "below_070": 0
+  },
+  "safety_flags_raised": 8,
+  "qa_flags_raised": 18,
+  "review_type_distribution": {
+    "standard_approval": 0,
+    "low_confidence": 1,
+    "urgent_safety": 4
+  },
+  "last_updated": "2026-05-14T12:05:13.787527"
+}

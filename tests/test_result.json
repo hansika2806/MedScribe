@@ -1,0 +1,106 @@
+{
+  "session_id": "1c0d07f2-a0d6-443f-851b-b03f4c5559e8",
+  "status": "completed",
+  "message": "SOAP note generated successfully",
+  "soap_note": {
+    "subjective": {
+      "content": "Patient reports chest pain for 3 days, shortness of breath especially at night, and a dull ache. The patient also mentions trouble sleeping, but this information is unverified as it was not directly stated by the patient.",
+      "confidence": 0.9,
+      "entities": [
+        {
+          "claim": "chest pain for 3 days",
+          "source": "transcript",
+          "speaker": "Patient",
+          "utterance": "Not great, doctor, my chest has been hurting for about 3 days now",
+          "verified": true,
+          "confidence": 0.95
+        },
+        {
+          "claim": "shortness of breath especially at night",
+          "source": "transcript",
+          "speaker": "Patient",
+          "utterance": "Yes, especially at night",
+          "verified": true,
+          "confidence": 0.95
+        },
+        {
+          "claim": "dull ache",
+          "source": "transcript",
+          "speaker": "Patient",
+          "utterance": "It's more of a dull Ache",
+          "verified": true,
+          "confidence": 0.95
+        },
+        {
+          "claim": "trouble sleeping",
+          "source": "transcript",
+          "speaker": "Doctor",
+          "utterance": "I've been having trouble sleeping",
+          "verified": false,
+          "confidence": 0.8
+        }
+      ],
+      "uncertain_spans": [
+        {
+          "text": "trouble sleeping",
+          "reason": "Information not directly stated by the patient"
+        }
+      ]
+    },
+    "objective": {
+      "content": "BP: 148/92 mmHg. Lab values pending physician input.",
+      "confidence": 0.85,
+      "entities": [
+        {
+          "claim": "BP: 148/92",
+          "source": "transcript",
+          "speaker": "Patient",
+          "utterance": "Not available",
+          "verified": true,
+          "confidence": 0.95
+        }
+      ],
+      "uncertain_spans": [
+        {
+          "text": "Lab values",
+          "reason": "Lab values are pending physician input"
+        }
+      ]
+    },
+    "assessment": {
+      "content": "1. Hypertension\n2. Diabetes",
+      "confidence": 0.85,
+      "entities": [],
+      "uncertain_spans": [],
+      "diagnoses": [
+        "Hypertension",
+        "Diabetes"
+      ]
+    },
+    "plan": {
+      "content": "1. Increase metformin to 1000mg twice daily.\n2. Start I'm low to pain 5mg once daily for blood pressure management.\n3. Patient to follow up in 2 weeks.",
+      "confidence": 0.85,
+      "entities": [
+        {
+          "claim": "metformin 1000mg twice daily",
+          "source": "transcript",
+          "speaker": "Doctor",
+          "utterance": "I'm going to increase your metformin to 1000mg twice daily",
+          "verified": true,
+          "confidence": 0.95
+        },
+        {
+          "claim": "I'm low to pain 5mg once daily",
+          "source": "transcript",
+          "speaker": "Doctor",
+          "utterance": "And I'll prescribe I'm low to pain 5mg once daily for your blood pressure",
+          "verified": true,
+          "confidence": 0.95
+        }
+      ],
+      "uncertain_spans": [],
+      "guideline_citations": []
+    }
+  },
+  "processing_time": 31.38167953491211
+}
