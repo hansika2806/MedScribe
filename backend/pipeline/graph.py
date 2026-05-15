@@ -9,9 +9,90 @@ from backend.pipeline.nodes.qa_guardrail import qa_guardrail
 from backend.pipeline.nodes.safety_guardrail import safety_guardrail
 from backend.tools.whisper import get_transcriber
 from backend.tools.diarization import diarize
+from backend.logging_config import get_performance_logger
 import logging
+import time
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_len(value) -> int:
+    if value is None:
+        return 0
+    try:
+        return len(value)
+    except TypeError:
+        return 1
+
+
+def _node_metric_sizes(state: PipelineState, node_name: str) -> tuple[int, int]:
+    """Return best-effort input/output sizes for performance logs."""
+    if node_name == "transcribe":
+        return 1, _safe_len(state.get("transcript_raw", ""))
+    if node_name == "clinical_relevance_filter":
+        transcript = state.get("transcript_diarized")
+        filtered = state.get("filtered_transcript")
+        return (
+            _safe_len(getattr(transcript, "utterances", [])),
+            _safe_len(getattr(filtered, "filtered_utterances", [])),
+        )
+    if node_name == "clinical_extractor":
+        filtered = state.get("filtered_transcript")
+        extracted = state.get("extracted_entities")
+        lab_count = _safe_len(getattr(extracted, "lab_values", {})) if extracted else 0
+        return (
+            _safe_len(getattr(filtered, "filtered_utterances", [])),
+            lab_count,
+        )
+    if node_name == "rag":
+        extracted = state.get("extracted_entities")
+        return (1 if extracted else 0, _safe_len(state.get("retrieved_guidelines", [])))
+    if node_name == "soap":
+        return (1 if state.get("extracted_entities") else 0, 1 if state.get("soap_note") else 0)
+    if node_name == "icd10":
+        soap = state.get("soap_note")
+        diagnoses = getattr(getattr(soap, "assessment", None), "diagnoses", [])
+        return (_safe_len(diagnoses), _safe_len(state.get("icd10_codes", [])))
+    if node_name == "qa_guardrail":
+        qa = state.get("qa_result", {})
+        return (1 if state.get("soap_note") else 0, _safe_len(qa.get("flags", [])))
+    if node_name == "safety_guardrail":
+        safety = state.get("safety_result", {})
+        return (1 if state.get("soap_note") else 0, _safe_len(safety.get("safety_flags", [])))
+    return 0, 0
+
+
+def _with_performance_logging(node_name: str, node_func):
+    def wrapped(state: PipelineState) -> PipelineState:
+        start_time = time.time()
+        starting_error = state.get("error")
+        try:
+            result_state = node_func(state)
+            duration = time.time() - start_time
+            status = "failure" if result_state.get("error") and result_state.get("error") != starting_error else "success"
+            input_size, output_size = _node_metric_sizes(result_state, node_name)
+            get_performance_logger().log_node(
+                session_id=result_state.get("session_id", "unknown"),
+                node_name=node_name,
+                status=status,
+                duration_seconds=duration,
+                input_size=input_size,
+                output_size=output_size,
+                error=result_state.get("error") if status == "failure" else None,
+            )
+            return result_state
+        except Exception as e:
+            duration = time.time() - start_time
+            get_performance_logger().log_node(
+                session_id=state.get("session_id", "unknown"),
+                node_name=node_name,
+                status="failure",
+                duration_seconds=duration,
+                error=str(e),
+            )
+            raise
+
+    return wrapped
 
 
 def transcribe_and_diarize_node(state: PipelineState) -> PipelineState:
@@ -155,14 +236,14 @@ def build_pipeline():
     workflow = StateGraph(PipelineState)
     
     # Add nodes in execution order
-    workflow.add_node("transcribe", transcribe_and_diarize_node)
-    workflow.add_node("filter", clinical_relevance_filter)
-    workflow.add_node("extract", clinical_extractor)
-    workflow.add_node("rag", rag_node)
-    workflow.add_node("soap", soap_generator)
-    workflow.add_node("icd10", icd10_node)
-    workflow.add_node("qa_guardrail", qa_guardrail)
-    workflow.add_node("safety_guardrail", safety_guardrail)
+    workflow.add_node("transcribe", _with_performance_logging("transcribe", transcribe_and_diarize_node))
+    workflow.add_node("filter", _with_performance_logging("clinical_relevance_filter", clinical_relevance_filter))
+    workflow.add_node("extract", _with_performance_logging("clinical_extractor", clinical_extractor))
+    workflow.add_node("rag", _with_performance_logging("rag", rag_node))
+    workflow.add_node("soap", _with_performance_logging("soap", soap_generator))
+    workflow.add_node("icd10", _with_performance_logging("icd10", icd10_node))
+    workflow.add_node("qa_guardrail", _with_performance_logging("qa_guardrail", qa_guardrail))
+    workflow.add_node("safety_guardrail", _with_performance_logging("safety_guardrail", safety_guardrail))
     workflow.add_node("confidence_router", confidence_router_node)
     workflow.add_node("urgent_handoff", urgent_handoff_node)
     workflow.add_node("review_handoff", review_handoff_node)

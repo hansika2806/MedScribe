@@ -133,6 +133,24 @@ def _to_plain_data(value: Any) -> Any:
     return value
 
 
+def _compact_json(value: Any) -> str:
+    """Serialize prompt context compactly to stay inside free-tier token limits."""
+    return json.dumps(
+        _to_plain_data(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _limit_items(items: Any, limit: int = 8) -> Any:
+    """Keep prompt context bounded without changing pipeline state."""
+    if isinstance(items, list):
+        return items[:limit]
+    if isinstance(items, dict):
+        return dict(list(items.items())[:limit])
+    return items
+
+
 def extract_json_from_response(text: str):
     """
     Extract JSON object from LLM response using multiple methods.
@@ -213,6 +231,37 @@ def _normalize_guideline_citation(citation: Any) -> str:
     return str(citation)
 
 
+def _normalize_soap_entity(entity: Any) -> dict[str, Any] | None:
+    """Coerce entity provenance fields into the SOAPEntity schema."""
+    if not isinstance(entity, dict):
+        return None
+
+    claim = entity.get("claim") or entity.get("name") or entity.get("value") or "Clinical finding"
+    source = entity.get("source") or "transcript"
+    speaker = entity.get("speaker") or ("ocr_system" if source in {"ocr", "ocr_only"} else "uncertain")
+    utterance = entity.get("utterance")
+    if utterance is None or utterance == "":
+        if source in {"ocr", "ocr_only", "both"} or speaker == "ocr_system":
+            utterance = f"OCR extracted value: {claim}"
+        else:
+            utterance = str(claim)
+
+    confidence = entity.get("confidence", 0.9)
+    try:
+        confidence = float(confidence)
+    except (TypeError, ValueError):
+        confidence = 0.9
+
+    return {
+        "claim": str(claim),
+        "source": str(source),
+        "speaker": str(speaker),
+        "utterance": str(utterance),
+        "verified": bool(entity.get("verified", True)),
+        "confidence": max(0.0, min(1.0, confidence)),
+    }
+
+
 def _get_section_alias(data: dict[str, Any], canonical_name: str) -> Any:
     """
     Fetch a SOAP section using forgiving aliases from LLM output.
@@ -286,7 +335,13 @@ def _normalize_section(section_name: str, raw_section: Any) -> dict[str, Any]:
         normalized["confidence"] = 0.0
 
     entities = raw_section.get("entities", [])
-    normalized["entities"] = entities if isinstance(entities, list) else []
+    if not isinstance(entities, list):
+        entities = []
+    normalized["entities"] = [
+        clean_entity
+        for clean_entity in (_normalize_soap_entity(entity) for entity in entities)
+        if clean_entity is not None
+    ]
 
     spans = raw_section.get("uncertain_spans", [])
     if not isinstance(spans, list):
@@ -385,22 +440,22 @@ def soap_generator(state: PipelineState) -> PipelineState:
     
     # Format entities for LLM
     entities_text = f"""
-Symptoms: {json.dumps(_to_plain_data(entities.symptoms), indent=2)}
-Medications: {json.dumps(_to_plain_data(entities.medications), indent=2)}
-Vitals: {json.dumps(_to_plain_data(entities.vitals), indent=2)}
-Lab Values: {json.dumps(_to_plain_data(entities.lab_values), indent=2)}
-Family History: {json.dumps(_to_plain_data(entities.family_history), indent=2)}
-Population Tag: {json.dumps(_to_plain_data(entities.population_tag), indent=2)}
+Symptoms: {_compact_json(_limit_items(entities.symptoms))}
+Medications: {_compact_json(_limit_items(entities.medications))}
+Vitals: {_compact_json(_limit_items(entities.vitals))}
+Lab Values: {_compact_json(_limit_items(entities.lab_values, limit=12))}
+Family History: {_compact_json(_limit_items(entities.family_history))}
+Population Tag: {_compact_json(entities.population_tag)}
 """
     
     # Format guidelines for LLM
     guidelines_text = ""
     if guidelines:
         guidelines_text = "\n\nRETRIEVED CLINICAL GUIDELINES:\n"
-        for i, g in enumerate(guidelines[:5], 1):
+        for i, g in enumerate(guidelines[:3], 1):
             guidelines_text += f"\n{i}. {g['source']} (relevance: {g['relevance_score']})\n"
             guidelines_text += f"   Population: {g['population_match']}\n"
-            guidelines_text += f"   {g['content'][:300]}...\n"
+            guidelines_text += f"   {g['content'][:140]}...\n"
     
     user_prompt = f"""Clinical entities:
 {entities_text}

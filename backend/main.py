@@ -17,8 +17,8 @@ settings = get_settings()
 
 app = FastAPI(
     title="MedScribe API",
-    description="Clinical Documentation AI - Phase 3",
-    version="0.3.0-phase3",
+    description="Clinical Documentation AI - Phase 4",
+    version="0.4.0-phase4",
     debug=settings.debug
 )
 
@@ -50,9 +50,9 @@ async def root():
     """Root endpoint"""
     return {
         "message": "MedScribe API - Clinical Documentation AI",
-        "version": "0.3.0-phase3",
+        "version": "0.4.0-phase4",
         "status": "running",
-        "phase": "Phase 3",
+        "phase": "Phase 4",
         "features": [
             "Audio transcription (faster-whisper)",
             "Real speaker diarization (Speechbrain + fallback)",
@@ -66,7 +66,9 @@ async def root():
             "SOAP note generation with citations",
             "Comprehensive metrics tracking",
             "SQLite persistence",
-            "Physician review and approval workflow"
+            "Physician review and approval workflow",
+            "PDF lab report OCR upload",
+            "Structured per-node performance logging",
         ]
     }
 

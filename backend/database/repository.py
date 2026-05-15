@@ -413,6 +413,17 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
 
     approved = bool(dict(soap).get("approved")) if soap else False
     approved_at = dict(soap).get("approved_at") if soap else None
+    extracted_lab_values = {
+        item["lab_name"]: {
+            "value": item.get("value", ""),
+            "unit": item.get("unit", ""),
+            "source": item.get("source", "ocr"),
+            "verified": bool(item.get("verified")),
+            "flag": item.get("flag"),
+        }
+        for item in labs
+        if item.get("source") in {"ocr", "ocr_only"}
+    }
 
     return {
         "session_id": consultation_data["id"],
@@ -426,6 +437,9 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
         "review_type": consultation_data.get("review_type"),
         "review_message": "",
         "diarization_method": consultation_data.get("diarization_method"),
+        "ocr_method": "paddleocr" if extracted_lab_values else None,
+        "ocr_page_count": None,
+        "extracted_lab_values": extracted_lab_values,
         "processing_time": consultation_data.get("processing_time_seconds"),
         "icd10_codes": [
             {
@@ -458,4 +472,3 @@ def approve_consultation(session_id: str) -> Dict[str, str]:
             (approved_at, session_id),
         )
     return {"status": "approved", "approved_at": approved_at}
-

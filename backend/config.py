@@ -10,9 +10,9 @@ class Settings(BaseSettings):
     
     # Groq API
     groq_api_key: str
-    llm_model: str = "llama3-8b-8192"
+    llm_model: str = "llama-3.3-70b-versatile"
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 2048
     
     # Audio Processing
     whisper_model: str = "base"

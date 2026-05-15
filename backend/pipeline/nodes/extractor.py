@@ -7,6 +7,36 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _plain(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _normalize_ocr_lab_values(lab_values: dict) -> dict:
+    """Convert OCR lab values into the ExtractedEntities schema."""
+    normalized = {}
+    if not isinstance(lab_values, dict):
+        return normalized
+
+    for lab_name, lab_data in lab_values.items():
+        if not isinstance(lab_data, dict):
+            continue
+        normalized[lab_name] = {
+            "value": str(lab_data.get("value", "")),
+            "source": "ocr_only",
+            "verified": bool(lab_data.get("verified", True)),
+            "flag": lab_data.get("flag"),
+        }
+    return normalized
+
+
 def extract_json_from_response(text: str):
     """
     Extract JSON object from LLM response using multiple methods.
@@ -187,10 +217,17 @@ def clinical_extractor(state: PipelineState) -> PipelineState:
     
     logger.debug(f"Formatted utterances:\n{utterances_text[:500]}...")
     
+    test_report_values = state.get("test_report_values", {})
+    ocr_result = state.get("ocr_result", {})
+    ocr_status = ocr_result.get("status", "unknown") if isinstance(ocr_result, dict) else "unknown"
+    ocr_values_text = json.dumps(_plain(test_report_values), indent=2)
+
     user_prompt = f"""Filtered transcript (clinically relevant utterances only):
 {utterances_text}
 
-OCR test values: Not available in Phase 1
+OCR status: {ocr_status}
+OCR test values:
+{ocr_values_text}
 
 Please extract clinical entities and output the JSON format specified."""
     
@@ -252,6 +289,21 @@ Please extract clinical entities and output the JSON format specified."""
             if isinstance(lab_vals, dict) and "status" in lab_vals and isinstance(lab_vals["status"], str):
                 logger.info(f"   Lab values status: {lab_vals['status']}")
                 entities_data["lab_values"] = {}
+
+            if isinstance(entities_data["lab_values"], dict):
+                for lab_data in entities_data["lab_values"].values():
+                    if isinstance(lab_data, dict) and lab_data.get("source") == "ocr":
+                        lab_data["source"] = "ocr_only"
+
+        # 2b. Merge OCR lab values if the model omitted them.
+        ocr_labs = _normalize_ocr_lab_values(state.get("test_report_values", {}))
+        if ocr_labs:
+            existing_labs = entities_data.get("lab_values", {})
+            if not isinstance(existing_labs, dict):
+                existing_labs = {}
+            for lab_name, lab_data in ocr_labs.items():
+                existing_labs.setdefault(lab_name, lab_data)
+            entities_data["lab_values"] = existing_labs
         
         # 3. Fix vitals: remove null entries the LLM sometimes emits for missing values
         if "vitals" in entities_data and isinstance(entities_data["vitals"], dict):

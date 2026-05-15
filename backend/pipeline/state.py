@@ -12,6 +12,10 @@ class PipelineState(TypedDict, total=False):
     
     # Input
     audio_path: str
+    pdf_path: str
+    ocr_result: Dict[str, Any]
+    ocr_method: str
+    test_report_values: Dict[str, Any]
     
     # Transcription (Node 2 & 2b output)
     transcript_raw: Optional[str]

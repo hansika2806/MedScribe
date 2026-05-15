@@ -1,26 +1,26 @@
 {
-  "total_consultations": 6,
-  "successful_completions": 5,
+  "total_consultations": 9,
+  "successful_completions": 8,
   "pipeline_failures": {
     "'dict' object has no attribute 'dict'": 1
   },
-  "average_processing_time": 79.58148713906606,
+  "average_processing_time": 79.41922436820136,
   "diarization_method_used": {
     "pyannote": 0,
     "speechbrain": 0,
-    "fallback": 5
+    "fallback": 8
   },
   "confidence_distribution": {
-    "above_085": 5,
+    "above_085": 8,
     "between_070_085": 0,
     "below_070": 0
   },
-  "safety_flags_raised": 8,
-  "qa_flags_raised": 18,
+  "safety_flags_raised": 11,
+  "qa_flags_raised": 27,
   "review_type_distribution": {
     "standard_approval": 0,
-    "low_confidence": 1,
-    "urgent_safety": 4
+    "low_confidence": 2,
+    "urgent_safety": 6
   },
-  "last_updated": "2026-05-14T12:05:13.787527"
+  "last_updated": "2026-05-15T03:43:51.103828"
 }

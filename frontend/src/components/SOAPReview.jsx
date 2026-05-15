@@ -38,6 +38,52 @@ function ConfidenceSummary({ qaResult }) {
   )
 }
 
+function LabValuesExtractedPanel({ values, pageCount }) {
+  const rows = Object.entries(values || {})
+  if (!rows.length) return null
+
+  return (
+    <section className="rounded-lg border border-emerald-200 bg-white shadow-sm">
+      <div className="rounded-t-lg bg-emerald-600 px-5 py-3 text-sm font-semibold text-white">
+        📄 Lab Values Extracted from PDF
+      </div>
+      <div className="p-5">
+        <div className="mb-3 text-sm text-emerald-900">
+          {rows.length} values extracted from {pageCount || 0} page PDF
+        </div>
+        <div className="overflow-hidden rounded-md border border-slate-200">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+              <tr>
+                <th className="px-4 py-3">Test Name</th>
+                <th className="px-4 py-3">Value</th>
+                <th className="px-4 py-3">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map(([name, lab]) => (
+                <tr key={name}>
+                  <td className="px-4 py-3 font-medium text-slate-950">{name.replaceAll('_', ' ')}</td>
+                  <td className="px-4 py-3 text-slate-700">{lab?.value || 'N/A'}</td>
+                  <td className="px-4 py-3 text-slate-700">PDF (OCR verified)</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function NoPdfObjectiveNote() {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-5 py-4 text-sm font-medium text-amber-900">
+      No test report uploaded. Lab values will be based on verbal mentions in consultation only.
+    </div>
+  )
+}
+
 export default function SOAPReview({ responseData, onNewConsultation, onSessionUpdate }) {
   const [data, setData] = useState(responseData)
   const [labsSaved, setLabsSaved] = useState(!hasPendingLabs(responseData))
@@ -48,6 +94,9 @@ export default function SOAPReview({ responseData, onNewConsultation, onSessionU
   const reviewType = data?.review_type || 'standard_approval'
   const bannerMeta = banner(reviewType)
   const showQa = reviewType === 'low_confidence' || (data?.qa_result?.flags || []).length > 0
+  const extractedLabValues = data?.extracted_lab_values || {}
+  const hasExtractedPdfLabs = Object.keys(extractedLabValues).length > 0
+  const noPdfUploaded = data?.ocr_method === 'no_pdf'
 
   const sections = useMemo(() => [
     { key: 'subjective', title: 'Subjective', data: soap.subjective },
@@ -86,19 +135,24 @@ export default function SOAPReview({ responseData, onNewConsultation, onSessionU
         {reviewType === 'standard_approval' && <ConfidenceSummary qaResult={data?.qa_result} />}
 
         {sections.map((section) => (
-          <SOAPSection
-            key={section.key}
-            sectionKey={section.key}
-            title={section.title}
-            content={section.data?.content || ''}
-            confidence={section.data?.confidence || 0}
-            entities={section.data?.entities || []}
-            uncertain_spans={section.data?.uncertain_spans || []}
-            diagnoses={section.data?.diagnoses || []}
-            icd10Codes={data?.icd10_codes || []}
-            guidelineCitations={section.data?.guideline_citations || []}
-            retrievedGuidelines={data?.retrieved_guidelines || []}
-          />
+          <div key={section.key} className="space-y-5">
+            {section.key === 'objective' && hasExtractedPdfLabs && (
+              <LabValuesExtractedPanel values={extractedLabValues} pageCount={data?.ocr_page_count} />
+            )}
+            {section.key === 'objective' && noPdfUploaded && <NoPdfObjectiveNote />}
+            <SOAPSection
+              sectionKey={section.key}
+              title={section.title}
+              content={section.data?.content || ''}
+              confidence={section.data?.confidence || 0}
+              entities={section.data?.entities || []}
+              uncertain_spans={section.data?.uncertain_spans || []}
+              diagnoses={section.data?.diagnoses || []}
+              icd10Codes={data?.icd10_codes || []}
+              guidelineCitations={section.data?.guideline_citations || []}
+              retrievedGuidelines={data?.retrieved_guidelines || []}
+            />
+          </div>
         ))}
 
         <LabValueInput sessionId={data?.session_id} responseData={data} onSaved={handleLabsSaved} />
@@ -120,4 +174,3 @@ export default function SOAPReview({ responseData, onNewConsultation, onSessionU
     </main>
   )
 }
-

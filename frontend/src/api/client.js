@@ -27,10 +27,13 @@ function normalizeError(error) {
   }
 }
 
-export async function submitConsultation(audioFile, sessionId) {
+export async function submitConsultation(audioFile, pdfFile = null, sessionId = null) {
   try {
     const formData = new FormData()
     formData.append('audio_file', audioFile)
+    if (pdfFile) {
+      formData.append('pdf_file', pdfFile)
+    }
     if (sessionId) {
       formData.append('session_id', sessionId)
     }
@@ -91,4 +94,3 @@ export async function retryConsultation(sessionId) {
     return normalizeError(error)
   }
 }
-

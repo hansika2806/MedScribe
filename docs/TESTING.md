@@ -1,6 +1,29 @@
 # MedScribe Testing Guide
 
-This guide explains how to test the MedScribe Phase 1 MVP implementation.
+This guide explains how to test MedScribe across the original MVP flow and later pipeline phases.
+
+## Phase 4 Quick Test
+
+Phase 4 added PDF upload, OCR lab extraction, OCR/transcript fusion, schema hardening, and performance logging. For the current multi-modal pipeline, use:
+
+```bash
+python tests/test_phase4.py
+```
+
+Start the backend first:
+
+```bash
+python -m backend.main
+```
+
+The Phase 4 test checks:
+
+1. Direct OCR extraction from `tests/pdfs/sample_lab_report.pdf`.
+2. Full API processing with audio plus PDF.
+3. Full API processing with audio only.
+4. Per-node performance logs from `GET /performance/{session_id}`.
+
+For detailed Phase 4 testing and troubleshooting, see `docs/PHASE4_TESTING_AND_DEBUGGING.md`.
 
 ## Overview
 

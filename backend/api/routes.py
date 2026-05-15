@@ -3,6 +3,8 @@ from backend.models.schemas import ConsultationResponse
 from backend.pipeline.graph import get_pipeline
 from backend.pipeline.state import PipelineState
 from backend.monitoring import record_consultation_metrics, get_current_metrics
+from backend.logging_config import get_performance_logger
+from backend.tools.ocr import process_pdf
 from backend.database.repository import (
     approve_consultation,
     get_consultation as get_persisted_consultation,
@@ -20,6 +22,7 @@ import uuid
 import logging
 from pathlib import Path
 import time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -55,21 +58,46 @@ def _collect_provenance(soap_note) -> list[dict]:
 def _extract_lab_values(final_state: PipelineState) -> list[dict]:
     """Extract available lab values from pipeline entities for persistence."""
     extracted = final_state.get("extracted_entities")
+    ocr_labs = final_state.get("test_report_values", {}) or {}
+    seen = set()
+    results = []
     if not extracted:
-        return []
+        for lab_name, lab_data in ocr_labs.items():
+            if not isinstance(lab_data, dict):
+                continue
+            results.append({
+                "lab_name": lab_name,
+                "value": lab_data.get("value", ""),
+                "unit": lab_data.get("unit", ""),
+                "source": lab_data.get("source", "ocr"),
+                "verified": lab_data.get("verified", True),
+                "flag": lab_data.get("flag"),
+            })
+        return results
     lab_values = _plain(getattr(extracted, "lab_values", {}) or {})
     if not isinstance(lab_values, dict):
-        return []
-    results = []
+        lab_values = {}
     for lab_name, lab_data in lab_values.items():
         if not isinstance(lab_data, dict):
             continue
+        seen.add(lab_name)
         results.append({
             "lab_name": lab_name,
             "value": lab_data.get("value", ""),
             "unit": lab_data.get("unit", ""),
             "source": lab_data.get("source", "transcript"),
             "verified": lab_data.get("verified", False),
+            "flag": lab_data.get("flag"),
+        })
+    for lab_name, lab_data in ocr_labs.items():
+        if lab_name in seen or not isinstance(lab_data, dict):
+            continue
+        results.append({
+            "lab_name": lab_name,
+            "value": lab_data.get("value", ""),
+            "unit": lab_data.get("unit", ""),
+            "source": lab_data.get("source", "ocr"),
+            "verified": lab_data.get("verified", True),
             "flag": lab_data.get("flag"),
         })
     return results
@@ -104,36 +132,66 @@ def _persist_success(session_id: str, final_state: PipelineState, processing_tim
 @router.post("/consultation", response_model=ConsultationResponse)
 async def create_consultation(
     audio_file: UploadFile = File(...),
+    pdf_file: Optional[UploadFile] = File(None),
     session_id: str | None = Form(default=None),
 ):
     """
     Process consultation audio and generate SOAP note
     
-    Phase 1: Simplified endpoint that processes immediately
+    Phase 4: Processes audio plus an optional PDF test report immediately.
     
     Args:
         audio_file: Audio file (WAV format recommended)
+        pdf_file: Optional PDF lab/test report for OCR extraction
         
     Returns:
         ConsultationResponse with SOAP note or error
     """
     session_id = session_id or str(uuid.uuid4())
+    start_time = time.time()
+    ocr_method = "no_pdf"
+    audio_path = TEMP_DIR / f"{session_id}.wav"
+    pdf_path = TEMP_DIR / f"{session_id}.pdf"
     
     try:
         save_consultation(session_id=session_id, status="processing")
 
         # Save uploaded audio file
-        audio_path = TEMP_DIR / f"{session_id}.wav"
         with open(audio_path, "wb") as f:
             content = await audio_file.read()
             f.write(content)
         
         logger.info(f"Processing consultation {session_id}, audio size: {len(content)} bytes")
-        start_time = time.time()
+
+        if pdf_file is not None:
+            with open(pdf_path, "wb") as f:
+                pdf_content = await pdf_file.read()
+                f.write(pdf_content)
+            logger.info(
+                "Processing uploaded PDF for session %s, size: %s bytes",
+                session_id,
+                len(pdf_content),
+            )
+            ocr_result = process_pdf(str(pdf_path))
+            ocr_method = "paddleocr" if ocr_result.get("status") == "success" else "failed"
+        else:
+            ocr_result = {
+                "test_values": "unavailable",
+                "reason": "no_pdf_uploaded",
+                "action": "physician_manual_entry",
+                "lab_values": {},
+                "status": "no_pdf",
+                "page_count": 0,
+            }
+            ocr_method = "no_pdf"
         
         # Initialize state
         initial_state: PipelineState = {
             "audio_path": str(audio_path),
+            "pdf_path": str(pdf_path) if pdf_file is not None else "",
+            "ocr_result": ocr_result,
+            "ocr_method": ocr_method,
+            "test_report_values": ocr_result.get("lab_values", {}),
             "transcript_raw": None,
             "transcript_diarized": None,
             "filtered_transcript": None,
@@ -154,6 +212,15 @@ async def create_consultation(
         # Check for errors
         if final_state.get("error"):
             logger.error(f"Pipeline error for session {session_id}: {final_state['error']}")
+            get_performance_logger().log_session(
+                session_id=session_id,
+                total_duration=processing_time,
+                review_type=final_state.get("review_type", "failed"),
+                diarization_method=final_state.get("diarization_method", "fallback"),
+                ocr_method=ocr_method,
+                node_count=8,
+                success=False,
+            )
             save_consultation(
                 session_id=session_id,
                 status="failed",
@@ -171,6 +238,15 @@ async def create_consultation(
         # Check if SOAP note was generated
         if not final_state.get("soap_note"):
             logger.error(f"No SOAP note generated for session {session_id}")
+            get_performance_logger().log_session(
+                session_id=session_id,
+                total_duration=processing_time,
+                review_type=final_state.get("review_type", "failed"),
+                diarization_method=final_state.get("diarization_method", "fallback"),
+                ocr_method=ocr_method,
+                node_count=8,
+                success=False,
+            )
             save_consultation(
                 session_id=session_id,
                 status="failed",
@@ -188,6 +264,8 @@ async def create_consultation(
         # Clean up temp file
         try:
             audio_path.unlink()
+            if pdf_path.exists():
+                pdf_path.unlink()
         except Exception as e:
             logger.warning(f"Failed to delete temp file: {e}")
         
@@ -208,6 +286,15 @@ async def create_consultation(
         )
 
         _persist_success(session_id, final_state, processing_time)
+        get_performance_logger().log_session(
+            session_id=session_id,
+            total_duration=processing_time,
+            review_type=final_state.get("review_type", "standard_approval"),
+            diarization_method=final_state.get("diarization_method", "fallback"),
+            ocr_method=ocr_method,
+            node_count=8,
+            success=True,
+        )
         
         # Build Phase 2 response
         response_data = {
@@ -224,6 +311,9 @@ async def create_consultation(
             "review_type": final_state.get("review_type", "standard_approval"),
             "review_message": final_state.get("review_message", ""),
             "diarization_method": final_state.get("diarization_method", "fallback"),
+            "ocr_method": ocr_method,
+            "ocr_page_count": ocr_result.get("page_count", 0),
+            "extracted_lab_values": ocr_result.get("lab_values", {}),
             "processing_time": processing_time,
             "approved": False,
         }
@@ -234,6 +324,16 @@ async def create_consultation(
         raise
     except Exception as e:
         logger.error(f"Error processing consultation: {e}", exc_info=True)
+        processing_time = time.time() - start_time
+        get_performance_logger().log_session(
+            session_id=session_id,
+            total_duration=processing_time,
+            review_type="failed",
+            diarization_method="fallback",
+            ocr_method=ocr_method,
+            node_count=8,
+            success=False,
+        )
         save_consultation(
             session_id=session_id,
             status="failed",
@@ -255,6 +355,13 @@ async def create_consultation(
                 "session_id": session_id
             }
         )
+    finally:
+        for path in [audio_path, pdf_path]:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as e:
+                logger.warning("Failed to delete temp file %s: %s", path, e)
 
 
 @router.get("/consultation/{session_id}", response_model=ConsultationResponse)
@@ -292,6 +399,15 @@ async def get_consultation_status(session_id: str):
         "current_node": current_node,
         "progress_percent": progress,
         "error_message": consultation.get("error_message"),
+    }
+
+
+@router.get("/performance/{session_id}")
+async def get_performance(session_id: str):
+    """Return structured performance records for a session."""
+    return {
+        "session_id": session_id,
+        "records": get_performance_logger().get_session_stats(session_id),
     }
 
 
@@ -337,7 +453,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "MedScribe API",
-        "version": "0.3.0-phase3"
+        "version": "0.4.0-phase4"
     }
 
 

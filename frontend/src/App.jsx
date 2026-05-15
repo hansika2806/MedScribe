@@ -39,6 +39,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState(null)
   const [error, setError] = useState(null)
   const [lastFile, setLastFile] = useState(null)
+  const [lastPdfFile, setLastPdfFile] = useState(null)
 
   useEffect(() => {
     const stored = sessionStorage.getItem(SESSION_KEY)
@@ -68,15 +69,16 @@ export default function App() {
     }
   }, [])
 
-  const startProcessing = useCallback(async (file) => {
+  const startProcessing = useCallback(async (file, pdfFile = null) => {
     const nextSessionId = createSessionId()
     setLastFile(file)
+    setLastPdfFile(pdfFile)
     setSessionId(nextSessionId)
     setError(null)
     setScreen('processing')
     sessionStorage.setItem(SCREEN_KEY, 'processing')
 
-    const result = await submitConsultation(file, nextSessionId)
+    const result = await submitConsultation(file, pdfFile, nextSessionId)
     if (!result.ok) {
       setError(result)
       setScreen('error')
@@ -100,7 +102,7 @@ export default function App() {
       await retryConsultation(sessionId)
     }
     if (lastFile) {
-      startProcessing(lastFile)
+      startProcessing(lastFile, lastPdfFile)
       return
     }
     setScreen('upload')
@@ -112,6 +114,7 @@ export default function App() {
     setSessionId(null)
     setError(null)
     setLastFile(null)
+    setLastPdfFile(null)
     setScreen('upload')
   }
 
@@ -147,4 +150,3 @@ export default function App() {
 
   return <UploadScreen onSubmit={startProcessing} />
 }
-

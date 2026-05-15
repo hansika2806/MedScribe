@@ -9,9 +9,11 @@ function isAccepted(file) {
 
 export default function UploadScreen({ onSubmit }) {
   const [selectedFile, setSelectedFile] = useState(null)
+  const [selectedPdf, setSelectedPdf] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const fileInputRef = useRef(null)
+  const pdfInputRef = useRef(null)
 
   const chooseFile = (file) => {
     if (!file) return
@@ -22,6 +24,17 @@ export default function UploadScreen({ onSubmit }) {
     }
     setError('')
     setSelectedFile(file)
+  }
+
+  const choosePdf = (file) => {
+    if (!file) return
+    if (!file.name?.toLowerCase().endsWith('.pdf')) {
+      setError('Please upload a PDF test report.')
+      setSelectedPdf(null)
+      return
+    }
+    setError('')
+    setSelectedPdf(file)
   }
 
   const handleDrop = (event) => {
@@ -77,6 +90,45 @@ export default function UploadScreen({ onSubmit }) {
           </div>
         )}
 
+        <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-5">
+          <div>
+            <label className="text-sm font-semibold text-slate-950">Test Report PDF (optional)</label>
+            <p className="mt-1 text-sm leading-6 text-slate-600">
+              Upload lab report, blood work, or any test report PDF. Values will be automatically extracted and included in the SOAP note.
+            </p>
+          </div>
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <button
+              type="button"
+              onClick={() => pdfInputRef.current?.click()}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100"
+            >
+              Choose PDF
+            </button>
+            {selectedPdf && (
+              <button
+                type="button"
+                onClick={() => setSelectedPdf(null)}
+                className="rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <input
+            ref={pdfInputRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            className="hidden"
+            onChange={(event) => choosePdf(event.target.files?.[0])}
+          />
+          {selectedPdf && (
+            <div className="mt-4 rounded-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800">
+              Selected: <span className="font-medium">{selectedPdf.name}</span>
+            </div>
+          )}
+        </div>
+
         {error && (
           <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
             {error}
@@ -86,7 +138,7 @@ export default function UploadScreen({ onSubmit }) {
         <button
           type="button"
           disabled={!selectedFile}
-          onClick={() => selectedFile && onSubmit(selectedFile)}
+          onClick={() => selectedFile && onSubmit(selectedFile, selectedPdf)}
           className="mt-6 w-full rounded-md bg-emerald-600 px-4 py-3 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           Start Consultation
@@ -95,4 +147,3 @@ export default function UploadScreen({ onSubmit }) {
     </main>
   )
 }
-
