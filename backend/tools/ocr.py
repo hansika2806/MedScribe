@@ -196,20 +196,22 @@ class MedicalOCR:
     """Extract report text and common lab values from medical PDFs."""
 
     def __init__(self):
-        self.ocr = None
-        if PaddleOCR is not None:
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang="en",
-                use_gpu=False,
-                show_log=False,
-            )
-            logger.info("PaddleOCR initialized successfully")
-        else:
-            logger.warning(
-                "PaddleOCR dependencies are not installed; "
-                "embedded PDF text fallback will be used when possible"
-            )
+        self._ocr = None
+
+    def _get_ocr(self):
+        if self._ocr is None and PaddleOCR is not None:
+            try:
+                self._ocr = PaddleOCR(
+                    use_angle_cls=False,
+                    lang="en",
+                    use_gpu=False,
+                    show_log=False,
+                )
+                logger.info("PaddleOCR initialized successfully")
+            except Exception as e:
+                logger.warning(f"PaddleOCR init failed: {e}")
+                self._ocr = None
+        return self._ocr
 
     def extract_from_pdf(self, pdf_path: str) -> dict:
         """
@@ -275,29 +277,33 @@ class MedicalOCR:
                 doc.close()
 
     def _extract_page_text(self, page: Any) -> list[str]:
-        """Run PaddleOCR on a page image, with embedded text as fallback."""
-        page_text: list[str] = []
-
-        if self.ocr is not None and np is not None and Image is not None:
-            mat = fitz.Matrix(300 / 72, 300 / 72)
-            pix = page.get_pixmap(matrix=mat)
-            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-            img_array = np.array(image)
-
-            result = self.ocr.ocr(img_array, cls=True)
-            if result and result[0]:
-                for line in result[0]:
-                    if line and len(line) >= 2:
-                        text = line[1][0]
-                        confidence = line[1][1]
-                        if confidence > 0.7:
-                            page_text.append(text)
-
-        if page_text:
-            return page_text
-
+        """Extract page text: first check embedded digital text (fast, 0 MB RAM), then fallback to OCR."""
         embedded_text = page.get_text("text") or ""
-        return [line.strip() for line in embedded_text.splitlines() if line.strip()]
+        lines = [line.strip() for line in embedded_text.splitlines() if line.strip()]
+        if lines:
+            return lines
+
+        page_text: list[str] = []
+        ocr_engine = self._get_ocr()
+        if ocr_engine is not None and np is not None and Image is not None:
+            try:
+                mat = fitz.Matrix(150 / 72, 150 / 72)
+                pix = page.get_pixmap(matrix=mat)
+                image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                img_array = np.array(image)
+
+                result = ocr_engine.ocr(img_array, cls=False)
+                if result and result[0]:
+                    for line in result[0]:
+                        if line and len(line) >= 2:
+                            text = line[1][0]
+                            confidence = line[1][1]
+                            if confidence > 0.7:
+                                page_text.append(text)
+            except Exception as e:
+                logger.warning(f"OCR failed for page: {e}")
+
+        return page_text
 
     def _extract_lab_values(self, text: str) -> dict:
         """

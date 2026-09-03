@@ -73,8 +73,9 @@ export async function submitConsultation(audioFile, pdfFile = null, sessionId = 
       formData.append('patient_context', JSON.stringify(cleanedContext))
     }
     const response = await api.post('/consultation', formData, {
-      headers: { ...getHeaders(), 'Content-Type': 'multipart/form-data' }
+      headers: getHeaders()
     })
+
     return { ok: true, data: response.data }
   } catch (error) {
     return normalizeError(error)
