@@ -10,6 +10,8 @@ Start here if you are studying the latest multi-modal implementation:
 - `PHASE4_DATA_FLOW.md` - Step-by-step data movement from upload to OCR to graph state to SOAP and persisted lab values.
 - `PHASE4_SCHEMA_AND_FALLBACKS.md` - The most important production lessons: schema drift, malformed JSON, source normalization, null handling, and conservative fallbacks.
 - `PHASE4_TESTING_AND_DEBUGGING.md` - How to run Phase 4 tests and debug OCR, API, token, diarization, and validation failures.
+- `PHASE5_IMPLEMENTATION.md` - Detailed Phase 5 auth, UI polish, fallbacks, and setbacks.
+- `PHASE6.md` - Remaining Phase 6 diarization plan and Phase 7 demo/repository polish plan.
 
 Recommended reading order:
 

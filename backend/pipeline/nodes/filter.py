@@ -42,6 +42,30 @@ def _extract_json_from_response(text: str):
     return None
 
 
+def _normalize_speaker(speaker: str) -> str:
+    """Normalize LLM speaker values to valid Pydantic literals.
+
+    The LLM occasionally returns bracketed variants like '[uncertain]',
+    '[Doctor]', '[Patient]', or unknown synonyms. Strip brackets and map
+    everything that isn't an exact literal to 'uncertain'.
+    """
+    if not isinstance(speaker, str):
+        return "uncertain"
+    # Strip surrounding brackets, whitespace and quotes
+    cleaned = speaker.strip().strip("[]\"'").strip()
+    # Exact matches first
+    if cleaned in {"Doctor", "Patient", "uncertain"}:
+        return cleaned
+    # Case-insensitive mapping for common variants
+    lower = cleaned.lower()
+    if lower in {"doctor", "physician", "dr", "dr."}:
+        return "Doctor"
+    if lower in {"patient", "pt"}:
+        return "Patient"
+    # Anything else is uncertain
+    return "uncertain"
+
+
 def _normalize_filter_payload(filtered_data: dict) -> dict:
     """Coerce common LLM shape drift before Pydantic validation."""
     if "filtered_utterances" not in filtered_data:
@@ -57,6 +81,12 @@ def _normalize_filter_payload(filtered_data: dict) -> dict:
     filtered_data.setdefault("lab_value_verification", [])
     filtered_data.setdefault("utterances_excluded_count", 0)
     filtered_data.setdefault("speaker_uncertain_count", 0)
+
+    # Normalize speaker values in every utterance so Pydantic doesn't reject
+    # bracketed variants like '[uncertain]' returned by some LLMs.
+    for utterance in filtered_data.get("filtered_utterances", []) or []:
+        if isinstance(utterance, dict) and "speaker" in utterance:
+            utterance["speaker"] = _normalize_speaker(utterance["speaker"])
 
     for item in filtered_data.get("lab_value_verification", []) or []:
         if item.get("source") == "ocr":
@@ -111,6 +141,57 @@ def _fallback_filter_payload(transcript, test_report_values: dict) -> dict:
         "utterances_excluded_count": 0,
         "speaker_uncertain_count": sum(1 for u in filtered_utterances if u["speaker_uncertain"]),
     }
+
+
+def _keyword_rescue_filter_payload(transcript, test_report_values: dict, existing_payload: dict) -> dict:
+    """Recover clinically relevant utterances without blindly including everything."""
+    clinical_keywords = [
+        "pain",
+        "mg",
+        "dosage",
+        "diagnosis",
+        "prescribed",
+        "symptom",
+        "blood",
+        "pressure",
+        "glucose",
+        "fever",
+        "breathing",
+        "chest",
+        "heart",
+        "medication",
+        "history",
+    ]
+    existing_by_text = {
+        item.get("utterance", ""): item
+        for item in existing_payload.get("filtered_utterances", [])
+        if isinstance(item, dict)
+    }
+    rescued = []
+    for utterance in transcript.utterances:
+        text = utterance.text or ""
+        lower = text.lower()
+        include = any(keyword in lower for keyword in clinical_keywords)
+        previous = existing_by_text.get(text, {})
+        rescued.append({
+            "speaker": utterance.speaker,
+            "utterance": text,
+            "included": include,
+            "maps_to": _map_utterance_to_section(utterance.speaker, text) if include else None,
+            "reason": (
+                "Keyword rescue: retained clinically relevant utterance"
+                if include else previous.get("reason", "Keyword rescue: no clinical keyword found")
+            ),
+            "speaker_uncertain": utterance.confidence < 0.8 or utterance.speaker == "uncertain",
+        })
+
+    return {
+        "filtered_utterances": rescued,
+        "lab_value_verification": existing_payload.get("lab_value_verification", []),
+        "utterances_excluded_count": sum(1 for item in rescued if not item["included"]),
+        "speaker_uncertain_count": sum(1 for item in rescued if item["speaker_uncertain"]),
+    }
+
 
 # SPECIFIC SYSTEM PROMPT - NOT GENERIC
 FILTER_SYSTEM_PROMPT = """ROLE:
@@ -193,37 +274,36 @@ CONSTRAINTS:
 - Never include without mapping to SOAP section
 - Speaker uncertain utterances always excluded
 - Verbally mentioned lab values without OCR match always flagged — never silently included
-- If diarization unavailable: mark all utterances speaker_uncertain and flag entire transcript for physician attribution review"""
+- If diarization unavailable: mark all utterances speaker_uncertain and flag entire transcript for physician attribution review
+- Speaker values MUST be exactly one of: "Patient", "Doctor", or "uncertain" — never use brackets"""
 
 
 def clinical_relevance_filter(state: PipelineState) -> PipelineState:
     """
-    Node 7: Clinical Relevance Filter (Agent 1)
-    
-    Runs AFTER transcription and diarization complete.
-    Determines which utterances are clinically relevant.
+    Node 7: Clinical Relevance Filter (Agent 1).
+
+    Runs after transcription and diarization. Phase 6 keeps the filter selective
+    by using keyword rescue before falling back to last-resort include-all.
     """
     logger.info("=" * 80)
     logger.info("NODE 7: Clinical Relevance Filter")
     logger.info("=" * 80)
-    
+
     transcript = state.get("transcript_diarized")
     if not transcript:
         error_msg = "No transcript available for filtering"
-        logger.error(f"❌ {error_msg}")
+        logger.error(error_msg)
         state["error"] = error_msg
         return state
-    
-    logger.info(f"📝 Input: {len(transcript.utterances)} diarized utterances")
-    
-    # Format utterances for LLM
+
+    logger.info("Input: %d diarized utterances", len(transcript.utterances))
+
     utterances_text = "\n".join([
         f"[{u.speaker}] (confidence: {u.confidence:.2f}): {u.text}"
         for u in transcript.utterances
     ])
-    
-    logger.debug(f"Formatted transcript:\n{utterances_text[:500]}...")
-    
+    logger.debug("Formatted transcript:\n%s...", utterances_text[:500])
+
     test_report_values = state.get("test_report_values", {})
     ocr_result = state.get("ocr_result", {})
     ocr_status = ocr_result.get("status", "unknown") if isinstance(ocr_result, dict) else "unknown"
@@ -237,11 +317,10 @@ OCR test values:
 {ocr_values_text}
 
 Please filter this transcript and output the JSON format specified."""
-    
-    # Call LLM
+
     llm = get_llm_service()
     try:
-        logger.info("🤖 Calling LLM for clinical relevance filtering...")
+        logger.info("Calling LLM for clinical relevance filtering...")
         response_text = llm.generate(
             FILTER_SYSTEM_PROMPT,
             user_prompt,
@@ -255,55 +334,74 @@ Please filter this transcript and output the JSON format specified."""
                 0,
             )
         filtered_data = _normalize_filter_payload(filtered_data)
-        
-        # Validate required fields
+
         if "filtered_utterances" not in filtered_data:
             logger.warning("Filter response missing filtered_utterances; using deterministic fallback")
-            filtered_data = _fallback_filter_payload(transcript, test_report_values)
-        
-        included_count = sum(1 for u in filtered_data['filtered_utterances'] if u['included'])
-        excluded_count = filtered_data.get('utterances_excluded_count', 0)
-        
-        # FALLBACK: If less than 2 utterances included, bypass filter and include all
+            filtered_data = _normalize_filter_payload(_fallback_filter_payload(transcript, test_report_values))
+
+        included_count = sum(1 for u in filtered_data["filtered_utterances"] if u["included"])
+        excluded_count = filtered_data.get("utterances_excluded_count", 0)
+
         if included_count < 2:
-            logger.warning("⚠️  Filter excluded too many utterances (< 2 included)")
-            logger.warning("⚠️  Bypassing filter - passing ALL utterances to Clinical Extractor")
-            
-            # Mark all utterances as included
-            for utterance in filtered_data['filtered_utterances']:
-                utterance['included'] = True
-                if not utterance.get('maps_to'):
-                    utterance['maps_to'] = 'Subjective'  # Default mapping
-                utterance['reason'] = 'Fallback: filter bypassed due to low inclusion rate'
-            
-            included_count = len(filtered_data['filtered_utterances'])
-            excluded_count = 0
-            filtered_data['utterances_excluded_count'] = 0
-        
-        # Create FilteredTranscript object
+            diarization_method = state.get("diarization_method", "unknown")
+            if diarization_method != "fallback":
+                logger.warning(
+                    "Filter included fewer than 2 utterances with %s diarization; "
+                    "filter may be too strict, applying keyword rescue",
+                    diarization_method,
+                )
+            else:
+                logger.warning("Fallback diarization included fewer than 2 utterances; applying keyword rescue")
+            rescued_data = _keyword_rescue_filter_payload(transcript, test_report_values, filtered_data)
+            rescued_count = sum(1 for u in rescued_data["filtered_utterances"] if u["included"])
+
+            if rescued_count > 0:
+                filtered_data = _normalize_filter_payload(rescued_data)
+                included_count = rescued_count
+                excluded_count = filtered_data["utterances_excluded_count"]
+                logger.warning("Keyword rescue retained %d utterances", rescued_count)
+            elif diarization_method == "fallback":
+                logger.warning("Fallback diarization with no rescued utterances; last-resort include-all enabled")
+                fallback_data = _fallback_filter_payload(transcript, test_report_values)
+                for utterance in fallback_data["filtered_utterances"]:
+                    utterance["reason"] = "Last-resort fallback: diarization unavailable and no clinical keywords rescued"
+                fallback_data["utterances_excluded_count"] = 0
+                filtered_data = _normalize_filter_payload(fallback_data)
+                included_count = len(filtered_data["filtered_utterances"])
+                excluded_count = 0
+            else:
+                logger.warning(
+                    "Real diarization method %s produced low clinical inclusion; trusting filtered result",
+                    diarization_method,
+                )
+
         state["filtered_transcript"] = FilteredTranscript(**filtered_data)
-        
-        logger.info(f"✅ Filter complete:")
-        logger.info(f"   Total utterances: {len(filtered_data['filtered_utterances'])}")
-        logger.info(f"   Included: {included_count}")
-        logger.info(f"   Excluded: {excluded_count}")
-        
-        # Log sample of included utterances
-        included_samples = [u for u in filtered_data['filtered_utterances'] if u['included']][:3]
+
+        logger.info("Filter complete:")
+        logger.info("   Total utterances: %d", len(filtered_data["filtered_utterances"]))
+        logger.info("   Included: %d", included_count)
+        logger.info("   Excluded: %d", excluded_count)
+
+        included_samples = [u for u in filtered_data["filtered_utterances"] if u["included"]][:3]
         if included_samples:
-            logger.info(f"   Sample included utterances:")
-            for u in included_samples:
-                logger.info(f"      - [{u['speaker']}] {u['utterance'][:50]}... → {u['maps_to']}")
-        
+            logger.info("   Sample included utterances:")
+            for utterance in included_samples:
+                logger.info(
+                    "      - [%s] %s... -> %s",
+                    utterance["speaker"],
+                    utterance["utterance"][:50],
+                    utterance["maps_to"],
+                )
+
     except json.JSONDecodeError as e:
-        logger.error(f"❌ Failed to parse filter response as JSON: {e}")
+        logger.error("Failed to parse filter response as JSON: %s", e)
         state["error"] = f"JSON parse error in Clinical Relevance Filter: {str(e)}"
     except Exception as e:
-        logger.error(f"❌ Error in Clinical Relevance Filter: {e}")
+        logger.error("Error in Clinical Relevance Filter: %s", e)
         import traceback
         logger.error(traceback.format_exc())
         state["error"] = f"Clinical Relevance Filter error: {str(e)}"
-    
+
     return state
 
 # Made with Bob

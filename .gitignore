@@ -1,72 +1,55 @@
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
 venv/
-ENV/
-env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Environment variables
+# Environment
 .env
-.env.local
+*.env.local
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Data and runtime
+data/chroma/
+data/chromadb/
+data/models/
+data/temp/
+data/*.db
+data/*.sqlite
+data/*.jsonl
+data/metrics.json
+data/performance_logs.jsonl
+*.log
+logs/
+
+# Test artifacts
+tests/audio/*.wav
+tests/audio/*.mp3
+tests/pdfs/*.pdf
+tests/phase6_diarization_results.json
+tests/test_result.json
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-logs/
-
-# Data
-data/temp/*
-!data/temp/.gitkeep
-data/chromadb/
-*.db
-*.sqlite
-
-# Models (downloaded by libraries)
-models/
-.cache/
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# FastAPI
-.pytest_cache/
-
-# Made with Bob
-
-# Ignore only Bob task logs
+# Local task notes
 bob_task_may-14-2026_1-45-43-pm.md
 bob_task_may-14-2026_11-06-30-am.md
 bob_task_may-14-2026_11-48-06-am.md
-

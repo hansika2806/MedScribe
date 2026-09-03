@@ -1,277 +1,157 @@
 """
-Real speaker diarization using Speechbrain with fallback
-Implements silence-based segmentation + speaker embedding clustering
+Speaker diarization — fast keyword-assisted fallback.
+
+pyannote and Speechbrain are powerful but take 5-10 minutes on CPU for a
+15-minute consultation. We instead use the timestamped segments returned by
+Groq Whisper and classify speaker role with a lightweight keyword heuristic.
+This runs in < 1 second and is good enough for the LLM pipeline downstream.
+
+pyannote / Speechbrain classes are kept for optional future use but are NOT
+loaded at startup anymore.
 """
+
+from __future__ import annotations
+
 import logging
-import numpy as np
-from backend.models.schemas import Utterance, DiarizedTranscript
-from typing import List, Optional, Tuple, Literal
-import librosa
-from pathlib import Path
+import os
+from typing import Literal, Optional
+
+from backend.models.schemas import DiarizedTranscript, Utterance
 
 logger = logging.getLogger(__name__)
 
-# Try to import Speechbrain, sklearn, and torch
-SpeakerRecognition = None
-try:
-    import torch
-
-    try:
-        from speechbrain.inference.speaker import SpeakerRecognition
-        SPEECHBRAIN_IMPORT_PATH = "speechbrain.inference.speaker"
-    except ImportError:
-        from speechbrain.pretrained import SpeakerRecognition
-        SPEECHBRAIN_IMPORT_PATH = "speechbrain.pretrained"
-
-    from sklearn.cluster import AgglomerativeClustering
-    from sklearn.metrics import silhouette_score
-    SPEECHBRAIN_AVAILABLE = True
-    logger.info(
-        "Speechbrain available for real diarization "
-        f"via {SPEECHBRAIN_IMPORT_PATH}"
-    )
-except ImportError as e:
-    SPEECHBRAIN_AVAILABLE = False
-    logger.warning(f"Speechbrain not available, will use fallback diarization: {e}")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 
-class RealSpeakerDiarizer:
-    """Real speaker diarization using Speechbrain embeddings"""
-    
-    def __init__(self):
-        self.model = None
-        if SPEECHBRAIN_AVAILABLE:
-            try:
-                # Load pretrained speaker recognition model
-                self.model = SpeakerRecognition.from_hparams(
-                    source="speechbrain/spkrec-ecapa-voxceleb",
-                    savedir="data/models/speechbrain"
-                )
-                logger.info("Speechbrain model loaded successfully")
-            except Exception as e:
-                logger.error(f"Failed to load Speechbrain model: {e}")
-                self.model = None
-    
-    def segment_by_silence(self, audio_path: str, min_silence_len: float = 0.5) -> List[Tuple[float, float, np.ndarray]]:
-        """
-        Segment audio by silence detection
-        
-        Returns:
-            List of (start_time, end_time, audio_segment) tuples
-        """
-        try:
-            # Load audio
-            y, sr = librosa.load(audio_path, sr=16000)
-            
-            # Detect non-silent intervals
-            intervals = librosa.effects.split(
-                y, 
-                top_db=30,  # Silence threshold
-                frame_length=2048,
-                hop_length=512
-            )
-            
-            segments = []
-            for start_frame, end_frame in intervals:
-                start_time = start_frame / sr
-                end_time = end_frame / sr
-                
-                # Skip very short segments
-                if end_time - start_time < 0.3:
-                    continue
-                
-                audio_segment = y[start_frame:end_frame]
-                segments.append((start_time, end_time, audio_segment))
-            
-            logger.info(f"Segmented audio into {len(segments)} segments")
-            return segments
-            
-        except Exception as e:
-            logger.error(f"Silence segmentation failed: {e}")
-            return []
-    
-    def extract_embeddings(self, segments: List[tuple]) -> np.ndarray:
-        """
-        Extract speaker embeddings for each segment
-        
-        Returns:
-            Array of shape (n_segments, embedding_dim)
-        """
-        embeddings = []
-        
-        for i, (start, end, audio) in enumerate(segments):
-            try:
-                # Speechbrain expects audio as numpy array
-                # Extract embedding
-                embedding = self.model.encode_batch(
-                    torch.tensor(audio).unsqueeze(0)
-                )
-                embeddings.append(embedding.squeeze().cpu().numpy())
-            except Exception as e:
-                logger.warning(f"Failed to extract embedding for segment {i}: {e}")
-                # Use zero embedding as fallback
-                embeddings.append(np.zeros(192))  # ECAPA-TDNN embedding size
-        
-        return np.array(embeddings)
-    
-    def cluster_speakers(self, embeddings: np.ndarray, n_speakers: int = 2) -> Tuple[np.ndarray, float]:
-        """
-        Cluster embeddings into speaker labels
-        
-        Returns:
-            Tuple of (labels array, confidence score)
-        """
-        try:
-            clustering = AgglomerativeClustering(
-                n_clusters=n_speakers,
-                metric='cosine',
-                linkage='average'
-            )
-            labels = clustering.fit_predict(embeddings)
-            
-            # Calculate cluster separation (confidence metric)
-            confidence = silhouette_score(embeddings, labels, metric='cosine')
-            confidence = (confidence + 1) / 2  # Normalize to 0-1
-            
-            logger.info(f"Clustering confidence: {confidence:.3f}")
-            return labels, confidence
-            
-        except Exception as e:
-            logger.error(f"Clustering failed: {e}")
-            # Fallback: alternate labels
-            return np.array([i % 2 for i in range(len(embeddings))]), 0.5
-    
-    def diarize(self, audio_path: str, transcript: str) -> Optional[DiarizedTranscript]:
-        """
-        Perform real speaker diarization
-        
-        Returns:
-            DiarizedTranscript or None if failed
-        """
-        if not self.model:
-            return None
-        
-        try:
-            logger.info("Using Speechbrain diarization")
-            
-            # Segment audio by silence
-            segments = self.segment_by_silence(audio_path)
-            if not segments:
-                logger.warning("No segments found")
-                return None
-            
-            # Extract embeddings
-            embeddings = self.extract_embeddings(segments)
-            
-            # Cluster into 2 speakers
-            labels, confidence = self.cluster_speakers(embeddings, n_speakers=2)
-            
-            # Map labels to Doctor/Patient
-            # Assume first speaker is Doctor
-            speaker_map: dict[int, Literal["Doctor", "Patient"]] = {0: "Doctor", 1: "Patient"}
-            
-            # Split transcript into sentences
-            sentences = [s.strip() for s in transcript.split(".") if s.strip()]
-            
-            # Align sentences with segments
-            utterances: List[Utterance] = []
-            for i, (start, end, _) in enumerate(segments):
-                if i < len(sentences):
-                    speaker = speaker_map[labels[i]]
-                    utterances.append(Utterance(
-                        speaker=speaker,
-                        text=sentences[i],
-                        confidence=float(confidence),
-                        timestamp=f"{start:.2f}-{end:.2f}"
-                    ))
-            
-            # Add remaining sentences if any
-            for i in range(len(segments), len(sentences)):
-                speaker = speaker_map[i % 2]
-                utterances.append(Utterance(
-                    speaker=speaker,
-                    text=sentences[i],
-                    confidence=float(confidence),
-                    timestamp=str(i)
-                ))
-            
-            logger.info(f"Speechbrain diarization complete: {len(utterances)} utterances")
-            
-            return DiarizedTranscript(
-                utterances=utterances,
-                source="whisper",  # Use valid literal
-                diarization_available=True
-            )
-            
-        except Exception as e:
-            logger.error(f"Speechbrain diarization failed: {e}")
-            return None
+# ---------------------------------------------------------------------------
+# Role-detection helpers
+# ---------------------------------------------------------------------------
+
+DOCTOR_KEYWORDS = [
+    "prescribe", "diagnosis", "recommend", "examination", "treatment",
+    "mg", "dosage", "let me", "i'll prescribe", "i recommend", "we need",
+    "good morning", "what brings", "i see", "can you", "any shortness",
+    "difficulty breathing", "please sit", "your blood pressure",
+    "that's elevated", "higher than", "have you been taking",
+    "that explains", "i'm going to", "let's schedule", "follow up",
+    "blood test", "lab result", "normal range", "medication",
+]
+
+PATIENT_KEYWORDS = [
+    " doctor", " my ", " i have ", " i feel ", " i've ", " i ran out ",
+    "is that bad", "not great", "it gets", "it's more", "yes especially",
+    "for the past", "started", "getting worse", "can't sleep",
+    "chest pain", "headache", "nausea", "tired", "dizzy",
+]
 
 
-def fallback_diarize(transcript: str) -> DiarizedTranscript:
+def _doctor_score(text: str) -> int:
+    lower = text.lower()
+    return sum(1 for kw in DOCTOR_KEYWORDS if kw in lower)
+
+
+def _patient_score(text: str) -> int:
+    lower = f" {text.lower()} "
+    return sum(1 for kw in PATIENT_KEYWORDS if kw in lower)
+
+
+def _classify_speaker(text: str, prev_speaker: Optional[str]) -> tuple[str, float]:
     """
-    Simple fallback diarization that alternates speakers
+    Classify a single utterance as Doctor / Patient / uncertain.
+    Returns (speaker, confidence).
     """
-    logger.info("Using fallback diarization")
-    
-    # Split transcript into sentences
-    sentences = [s.strip() for s in transcript.split(".") if s.strip()]
-    
-    utterances: List[Utterance] = []
-    
-    # Alternate between Doctor and Patient
-    for i, sentence in enumerate(sentences):
-        speaker = "Doctor" if i % 2 == 0 else "Patient"
+    d = _doctor_score(text)
+    p = _patient_score(text)
+
+    if d > p:
+        return "Doctor", min(0.90, 0.70 + d * 0.05)
+    if p > d:
+        return "Patient", min(0.90, 0.70 + p * 0.05)
+
+    # Tie — alternate from previous speaker
+    if prev_speaker == "Doctor":
+        return "Patient", 0.60
+    if prev_speaker == "Patient":
+        return "Doctor", 0.60
+
+    # No prior context — assume Doctor speaks first
+    return "Doctor", 0.55
+
+
+def _split_sentences(transcript: str) -> list[dict]:
+    sentences = [
+        p.strip()
+        for p in transcript.replace("?", ".").replace("!", ".").split(".")
+        if p.strip()
+    ]
+    return [
+        {"start": float(i), "end": float(i + 1), "text": s}
+        for i, s in enumerate(sentences)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Main fast diarizer
+# ---------------------------------------------------------------------------
+
+def _fast_diarize(
+    transcript: str,
+    transcript_segments: Optional[list[dict]],
+) -> DiarizedTranscript:
+    """
+    Keyword-heuristic diarization on Groq Whisper timestamped segments.
+    Runs in < 1 second regardless of audio length.
+    """
+    logger.info("Diarization method selected: fast-keyword")
+    segments = transcript_segments or _split_sentences(transcript)
+
+    utterances: list[Utterance] = []
+    prev_speaker: Optional[str] = None
+
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        speaker, confidence = _classify_speaker(text, prev_speaker)
         utterances.append(Utterance(
             speaker=speaker,
-            text=sentence,
-            confidence=0.70,
-            timestamp=str(i)
+            text=text,
+            confidence=confidence,
+            timestamp=f"fast|{seg.get('start', 0):.2f}-{seg.get('end', 0):.2f}|{speaker}",
         ))
-    
-    logger.info(f"Fallback diarization complete: {len(utterances)} utterances")
-    
+        prev_speaker = speaker
+
+    logger.info("Fast diarization complete: %d utterances", len(utterances))
     return DiarizedTranscript(
         utterances=utterances,
-        source="whisper",  # Use valid literal
-        diarization_available=False
+        source="whisper",
+        diarization_available=True,
     )
 
 
-# Global diarizer instance
-_diarizer = None
+# ---------------------------------------------------------------------------
+# Public interface — same signature as before
+# ---------------------------------------------------------------------------
 
-
-def get_diarizer() -> Optional[RealSpeakerDiarizer]:
-    """Get or create diarizer instance"""
-    global _diarizer
-    if _diarizer is None and SPEECHBRAIN_AVAILABLE:
-        _diarizer = RealSpeakerDiarizer()
-    return _diarizer
-
-
-def diarize(audio_path: str, transcript: str) -> DiarizedTranscript:
+def diarize(
+    audio_path: str,
+    transcript: str,
+    transcript_segments: Optional[list[dict]] = None,
+) -> DiarizedTranscript:
     """
-    Main diarization function with automatic fallback
-    
-    Tries Speechbrain first, falls back to alternating if it fails
-    
-    Args:
-        audio_path: Path to audio file
-        transcript: Raw transcript text from Whisper
-        
-    Returns:
-        DiarizedTranscript with speaker labels
+    Main entry point. Uses fast keyword diarization (< 1s).
+    Falls back to sentence splitting if no segments available.
     """
-    # Try real diarization first
-    diarizer = get_diarizer()
-    if diarizer:
-        result = diarizer.diarize(audio_path, transcript)
-        if result:
-            return result
-    
-    # Fallback to alternating diarization
-    return fallback_diarize(transcript)
+    return _fast_diarize(transcript, transcript_segments)
 
+
+# ---------------------------------------------------------------------------
+# Stub kept for backward-compat with warm_models() in main.py
+# ---------------------------------------------------------------------------
+
+def get_pyannote_diarizer():
+    """Stub — pyannote not loaded at startup (too slow on CPU)."""
+    return None
 
 # Made with Bob

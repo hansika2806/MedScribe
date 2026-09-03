@@ -1,10 +1,18 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Body, Form
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Body, Form
+from starlette.concurrency import run_in_threadpool
+from backend.auth.dependency import get_current_physician
+from backend.errors import ERROR_CODES, detect_error_code, make_error_response
 from backend.models.schemas import ConsultationResponse
-from backend.pipeline.graph import get_pipeline
 from backend.pipeline.state import PipelineState
 from backend.monitoring import record_consultation_metrics, get_current_metrics
 from backend.logging_config import get_performance_logger
-from backend.tools.ocr import process_pdf
+from backend.utils import plain_dict, scrub_phi, validate_file_size
+from backend.constants import (
+    MAX_AUDIO_SIZE_BYTES,
+    MAX_PDF_SIZE_BYTES,
+    ALLOWED_AUDIO_TYPES,
+    ALLOWED_PDF_TYPES,
+)
 from backend.database.repository import (
     approve_consultation,
     get_consultation as get_persisted_consultation,
@@ -18,6 +26,7 @@ from backend.database.repository import (
     save_soap_note,
     update_lab_values,
 )
+import json
 import uuid
 import logging
 from pathlib import Path
@@ -30,23 +39,87 @@ router = APIRouter()
 TEMP_DIR = Path("data/temp")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm", ".ogg"}
+AUDIO_EXTENSION_BY_CONTENT_TYPE = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+}
 
-def _plain(value):
-    """Convert Pydantic models to JSON-safe plain data."""
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    if hasattr(value, "dict"):
-        return value.dict()
-    if isinstance(value, dict):
-        return {k: _plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_plain(item) for item in value]
-    return value
+
+def _safe_temp_stem(value: str) -> str:
+    safe = "".join(
+        char if char.isascii() and (char.isalnum() or char in {"-", "_"}) else "_"
+        for char in value
+    ).strip("_")
+    return safe or str(uuid.uuid4())
+
+
+def _audio_extension(upload: UploadFile) -> str:
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix in AUDIO_EXTENSIONS:
+        return suffix
+    return AUDIO_EXTENSION_BY_CONTENT_TYPE.get(upload.content_type or "", ".wav")
+
+
+def _parse_patient_context(raw_context: str | None) -> dict:
+    if not raw_context:
+        return {}
+    try:
+        parsed = json.loads(raw_context)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                detail=f"Invalid patient_context JSON: {exc.msg}",
+            ),
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                detail="patient_context must be a JSON object",
+            ),
+        )
+    allowed_keys = {"age", "gender", "allergies", "current_meds", "chief_complaint"}
+    cleaned = {}
+    for key, value in parsed.items():
+        if key not in allowed_keys or value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            cleaned[key] = text
+    return cleaned
 
 
 def _collect_provenance(soap_note) -> list[dict]:
-    """Flatten SOAP section entities into persisted provenance records."""
-    soap = _plain(soap_note)
+    """
+    Flatten SOAP section entities into persisted provenance records.
+    
+    Extracts all entities from each SOAP section (subjective, objective,
+    assessment, plan) and adds the section name to each entity for tracking.
+    
+    Args:
+        soap_note: SOAP note object (Pydantic model or dict) containing
+                  sections with entities
+    
+    Returns:
+        List of entity dictionaries with added 'soap_section' field
+        
+    Example:
+        >>> soap = {"subjective": {"entities": [{"claim": "chest pain"}]}}
+        >>> _collect_provenance(soap)
+        [{"claim": "chest pain", "soap_section": "subjective"}]
+    """
+    soap = plain_dict(soap_note)
     records = []
     for section in ["subjective", "objective", "assessment", "plan"]:
         for entity in soap.get(section, {}).get("entities", []) or []:
@@ -56,7 +129,47 @@ def _collect_provenance(soap_note) -> list[dict]:
 
 
 def _extract_lab_values(final_state: PipelineState) -> list[dict]:
-    """Extract available lab values from pipeline entities for persistence."""
+    """
+    Extract available lab values from pipeline entities for persistence.
+    
+    Combines lab values from both transcript extraction and OCR processing,
+    prioritizing transcript values when available and adding OCR values
+    for any labs not found in the transcript.
+    
+    Args:
+        final_state: Pipeline state containing extracted_entities and
+                    test_report_values from OCR
+    
+    Returns:
+        List of lab value dictionaries with fields:
+        - lab_name: Name of the lab test
+        - value: Measured value
+        - unit: Unit of measurement
+        - source: 'transcript' or 'ocr'
+        - verified: Boolean indicating if value is verified
+        - flag: Optional flag (e.g., 'high', 'low')
+        
+    Example:
+        >>> state = {"extracted_entities": {"lab_values": {"HbA1c": {"value": "7.2"}}}}
+        >>> _extract_lab_values(state)
+        [{"lab_name": "HbA1c", "value": "7.2", "source": "transcript", ...}]
+    """
+    def build_lab_row(lab_name: str, lab_data: dict, default_source: str) -> dict:
+        source = lab_data.get("source", default_source)
+        value = lab_data.get("value", "")
+        pdf_verified = source in {"ocr", "ocr_only", "both"} and bool(str(value).strip())
+        return {
+            "lab_name": lab_name,
+            "value": value,
+            "unit": lab_data.get("unit", ""),
+            "source": "ocr_only" if source == "ocr" else source,
+            "verified": True if pdf_verified else lab_data.get("verified", False),
+            "flag": lab_data.get("flag"),
+            "reference_range": lab_data.get("reference_range", ""),
+            "display_name": lab_data.get("display_name", lab_name),
+            "interpretation": lab_data.get("interpretation") or lab_data.get("flag") or "",
+        }
+
     extracted = final_state.get("extracted_entities")
     ocr_labs = final_state.get("test_report_values", {}) or {}
     seen = set()
@@ -65,47 +178,57 @@ def _extract_lab_values(final_state: PipelineState) -> list[dict]:
         for lab_name, lab_data in ocr_labs.items():
             if not isinstance(lab_data, dict):
                 continue
-            results.append({
-                "lab_name": lab_name,
-                "value": lab_data.get("value", ""),
-                "unit": lab_data.get("unit", ""),
-                "source": lab_data.get("source", "ocr"),
-                "verified": lab_data.get("verified", True),
-                "flag": lab_data.get("flag"),
-            })
+            results.append(build_lab_row(lab_name, lab_data, "ocr_only"))
         return results
-    lab_values = _plain(getattr(extracted, "lab_values", {}) or {})
+    lab_values = plain_dict(getattr(extracted, "lab_values", {}) or {})
     if not isinstance(lab_values, dict):
         lab_values = {}
     for lab_name, lab_data in lab_values.items():
         if not isinstance(lab_data, dict):
             continue
         seen.add(lab_name)
-        results.append({
-            "lab_name": lab_name,
-            "value": lab_data.get("value", ""),
-            "unit": lab_data.get("unit", ""),
-            "source": lab_data.get("source", "transcript"),
-            "verified": lab_data.get("verified", False),
-            "flag": lab_data.get("flag"),
-        })
+        results.append(build_lab_row(lab_name, lab_data, "transcript"))
     for lab_name, lab_data in ocr_labs.items():
         if lab_name in seen or not isinstance(lab_data, dict):
             continue
-        results.append({
-            "lab_name": lab_name,
-            "value": lab_data.get("value", ""),
-            "unit": lab_data.get("unit", ""),
-            "source": lab_data.get("source", "ocr"),
-            "verified": lab_data.get("verified", True),
-            "flag": lab_data.get("flag"),
-        })
+        results.append(build_lab_row(lab_name, lab_data, "ocr_only"))
     return results
 
 
-def _persist_success(session_id: str, final_state: PipelineState, processing_time: float) -> None:
-    """Persist all successful Phase 3 session artifacts."""
-    soap_note = _plain(final_state["soap_note"])
+def _persist_success(
+    session_id: str,
+    final_state: PipelineState,
+    processing_time: float,
+    physician_username: str,
+) -> None:
+    """
+    Persist all successful consultation session artifacts to database.
+    
+    Saves the complete consultation data including SOAP note, diagnoses,
+    provenance records, guidelines, QA results, safety results, and lab values.
+    
+    Args:
+        session_id: Unique identifier for the consultation session
+        final_state: Complete pipeline state with all generated data
+        processing_time: Total time taken to process consultation (seconds)
+        physician_username: Username of the physician who initiated the consultation
+        
+    Returns:
+        None - All data is persisted to SQLite database
+        
+    Raises:
+        Database errors are propagated to caller for handling
+        
+    Side Effects:
+        - Creates/updates consultation record
+        - Saves SOAP note sections
+        - Saves ICD-10 diagnoses
+        - Saves provenance records for all entities
+        - Saves retrieved clinical guidelines
+        - Saves QA and safety check results
+        - Saves lab values if present
+    """
+    soap_note = plain_dict(final_state.get("soap_note"))
     qa_result = final_state.get("qa_result", {})
     safety_result = final_state.get("safety_result", {})
     icd10_codes = final_state.get("icd10_codes", [])
@@ -118,13 +241,14 @@ def _persist_success(session_id: str, final_state: PipelineState, processing_tim
         diarization_method=final_state.get("diarization_method", "fallback"),
         processing_time_seconds=processing_time,
         error_message=None,
+        physician_username=physician_username,
     )
     save_soap_note(session_id, soap_note)
-    save_diagnoses(session_id, _plain(icd10_codes))
+    save_diagnoses(session_id, plain_dict(icd10_codes))
     save_provenance(session_id, _collect_provenance(soap_note))
-    save_guidelines(session_id, _plain(final_state.get("retrieved_guidelines", [])))
-    save_qa_result(session_id, _plain(qa_result))
-    save_safety_result(session_id, _plain(safety_result))
+    save_guidelines(session_id, plain_dict(final_state.get("retrieved_guidelines", [])))
+    save_qa_result(session_id, plain_dict(qa_result))
+    save_safety_result(session_id, plain_dict(safety_result))
     if lab_values:
         save_lab_values(session_id, lab_values)
 
@@ -134,6 +258,8 @@ async def create_consultation(
     audio_file: UploadFile = File(...),
     pdf_file: Optional[UploadFile] = File(None),
     session_id: str | None = Form(default=None),
+    patient_context: str | None = Form(default=None),
+    current_physician: dict = Depends(get_current_physician),
 ):
     """
     Process consultation audio and generate SOAP note
@@ -150,29 +276,74 @@ async def create_consultation(
     session_id = session_id or str(uuid.uuid4())
     start_time = time.time()
     ocr_method = "no_pdf"
-    audio_path = TEMP_DIR / f"{session_id}.wav"
-    pdf_path = TEMP_DIR / f"{session_id}.pdf"
+    temp_stem = _safe_temp_stem(session_id)
+    audio_path = TEMP_DIR / f"{temp_stem}{_audio_extension(audio_file)}"
+    pdf_path = TEMP_DIR / f"{temp_stem}.pdf"
+    parsed_patient_context = _parse_patient_context(patient_context)
     
     try:
-        save_consultation(session_id=session_id, status="processing")
+        save_consultation(
+            session_id=session_id,
+            status="processing",
+            patient_context=parsed_patient_context,
+            physician_username=current_physician["username"],
+        )
 
-        # Save uploaded audio file
+        # Validate and save uploaded audio file
+        content = await audio_file.read()
+        
+        # Validate audio file size
+        is_valid, error_msg = validate_file_size(len(content), MAX_AUDIO_SIZE_BYTES, "Audio")
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error_response(
+                    "UNKNOWN_ERROR",
+                    session_id=session_id,
+                    detail=error_msg,
+                ),
+            )
+        
+        # Validate audio content type
+        if audio_file.content_type and audio_file.content_type not in ALLOWED_AUDIO_TYPES:
+            logger.warning(f"Unexpected audio content type: {audio_file.content_type}")
+        
         with open(audio_path, "wb") as f:
-            content = await audio_file.read()
             f.write(content)
         
-        logger.info(f"Processing consultation {session_id}, audio size: {len(content)} bytes")
+        logger.info(scrub_phi(f"Processing consultation {session_id}, audio size: {len(content)} bytes"))
 
         if pdf_file is not None:
+            pdf_content = await pdf_file.read()
+            
+            # Validate PDF file size
+            is_valid, error_msg = validate_file_size(len(pdf_content), MAX_PDF_SIZE_BYTES, "PDF")
+            if not is_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error_response(
+                        "UNKNOWN_ERROR",
+                        session_id=session_id,
+                        detail=error_msg,
+                    ),
+                )
+            
+            # Validate PDF content type
+            if pdf_file.content_type and pdf_file.content_type not in ALLOWED_PDF_TYPES:
+                logger.warning(f"Unexpected PDF content type: {pdf_file.content_type}")
+            
             with open(pdf_path, "wb") as f:
-                pdf_content = await pdf_file.read()
                 f.write(pdf_content)
-            logger.info(
-                "Processing uploaded PDF for session %s, size: %s bytes",
-                session_id,
-                len(pdf_content),
-            )
-            ocr_result = process_pdf(str(pdf_path))
+            logger.info(scrub_phi(
+                f"Processing uploaded PDF for session {session_id}, size: {len(pdf_content)} bytes"
+            ))
+            # On Windows, PaddleOCR and faster-whisper can load conflicting native
+            # runtimes. Initialize Whisper first so audio transcription remains stable.
+            from backend.tools.whisper import get_transcriber
+            from backend.tools.ocr import process_pdf
+
+            await run_in_threadpool(get_transcriber)
+            ocr_result = await run_in_threadpool(process_pdf, str(pdf_path))
             ocr_method = "paddleocr" if ocr_result.get("status") == "success" else "failed"
         else:
             ocr_result = {
@@ -192,7 +363,9 @@ async def create_consultation(
             "ocr_result": ocr_result,
             "ocr_method": ocr_method,
             "test_report_values": ocr_result.get("lab_values", {}),
+            "patient_context": parsed_patient_context,
             "transcript_raw": None,
+            "transcript_segments": [],
             "transcript_diarized": None,
             "filtered_transcript": None,
             "extracted_entities": None,
@@ -204,8 +377,10 @@ async def create_consultation(
         
         # Run pipeline
         logger.info(f"Starting pipeline for session {session_id}")
+        from backend.pipeline.graph import get_pipeline
+
         pipeline = get_pipeline()
-        final_state = pipeline.invoke(initial_state)
+        final_state = await run_in_threadpool(pipeline.invoke, initial_state)
         
         processing_time = time.time() - start_time
         
@@ -225,14 +400,16 @@ async def create_consultation(
                 session_id=session_id,
                 status="failed",
                 error_message=str(final_state["error"]),
+                physician_username=current_physician["username"],
             )
+            error_code = detect_error_code(str(final_state["error"]))
             raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "Pipeline processing failed",
-                    "error": str(final_state['error']),
-                    "session_id": session_id
-                }
+                status_code=ERROR_CODES[error_code]["http_status"],
+                detail=make_error_response(
+                    error_code,
+                    session_id=session_id,
+                    detail=str(final_state["error"]),
+                ),
             )
         
         # Check if SOAP note was generated
@@ -251,14 +428,16 @@ async def create_consultation(
                 session_id=session_id,
                 status="failed",
                 error_message="SOAP note generation failed - no output produced",
+                physician_username=current_physician["username"],
             )
+            error_code = "PIPELINE_VALIDATION_ERROR"
             raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "Pipeline processing failed",
-                    "error": "SOAP note generation failed - no output produced",
-                    "session_id": session_id
-                }
+                status_code=ERROR_CODES[error_code]["http_status"],
+                detail=make_error_response(
+                    error_code,
+                    session_id=session_id,
+                    detail="SOAP note generation failed - no output produced",
+                ),
             )
         
         # Clean up temp file
@@ -285,7 +464,12 @@ async def create_consultation(
             review_type=final_state.get("review_type", "standard_approval")
         )
 
-        _persist_success(session_id, final_state, processing_time)
+        _persist_success(
+            session_id,
+            final_state,
+            processing_time,
+            current_physician["username"],
+        )
         get_performance_logger().log_session(
             session_id=session_id,
             total_duration=processing_time,
@@ -316,6 +500,8 @@ async def create_consultation(
             "extracted_lab_values": ocr_result.get("lab_values", {}),
             "processing_time": processing_time,
             "approved": False,
+            "physician_username": current_physician["username"],
+            "patient_context": parsed_patient_context,
         }
         
         return response_data
@@ -338,6 +524,7 @@ async def create_consultation(
             session_id=session_id,
             status="failed",
             error_message=str(e),
+            physician_username=current_physician["username"],
         )
         
         # Record failure metrics
@@ -346,14 +533,14 @@ async def create_consultation(
             processing_time=0.0,
             error=str(e)
         )
-        
+        error_code = detect_error_code(str(e))
         raise HTTPException(
-            status_code=500,
-            detail={
-                "message": "Pipeline processing failed",
-                "error": str(e),
-                "session_id": session_id
-            }
+            status_code=ERROR_CODES[error_code]["http_status"],
+            detail=make_error_response(
+                error_code,
+                session_id=session_id,
+                detail=str(e),
+            ),
         )
     finally:
         for path in [audio_path, pdf_path]:
@@ -365,13 +552,23 @@ async def create_consultation(
 
 
 @router.get("/consultation/{session_id}", response_model=ConsultationResponse)
-async def get_consultation(session_id: str):
+async def get_consultation(
+    session_id: str,
+    current_physician: dict = Depends(get_current_physician),
+):
     """
     Get full persisted consultation session for refresh restore
     """
     consultation = get_persisted_consultation(session_id)
     if not consultation:
-        raise HTTPException(status_code=404, detail="Consultation not found")
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                session_id=session_id,
+                detail="Consultation not found",
+            ),
+        )
     return consultation
 
 
@@ -380,7 +577,14 @@ async def get_consultation_status(session_id: str):
     """Return minimal persisted status for polling."""
     consultation = get_persisted_consultation(session_id)
     if not consultation:
-        raise HTTPException(status_code=404, detail="Consultation not found")
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                session_id=session_id,
+                detail="Consultation not found",
+            ),
+        )
 
     status = consultation.get("status", "processing")
     if status == "completed":
@@ -418,7 +622,14 @@ async def update_consultation_labs(
 ):
     """Update lab values before physician approval."""
     if not get_persisted_consultation(session_id):
-        raise HTTPException(status_code=404, detail="Consultation not found")
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                session_id=session_id,
+                detail="Consultation not found",
+            ),
+        )
     update_lab_values(session_id, payload.get("lab_values", []))
     return {"status": "updated", "session_id": session_id}
 
@@ -427,15 +638,29 @@ async def update_consultation_labs(
 async def approve_consultation_endpoint(
     session_id: str,
     payload: dict = Body(default={}),
+    current_physician: dict = Depends(get_current_physician),
 ):
     """Approve and finalize a consultation note."""
     if not get_persisted_consultation(session_id):
-        raise HTTPException(status_code=404, detail="Consultation not found")
-    result = approve_consultation(session_id)
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                session_id=session_id,
+                detail="Consultation not found",
+            ),
+        )
+    result = approve_consultation(
+        session_id,
+        physician_username=current_physician["username"],
+        physician_name=current_physician["physician_name"],
+    )
     return {
         "status": result["status"],
         "approved_at": result["approved_at"],
         "session_id": session_id,
+        "approved_by": result["approved_by"],
+        "physician_username": result["physician_username"],
     }
 
 
@@ -443,7 +668,14 @@ async def approve_consultation_endpoint(
 async def retry_consultation(session_id: str):
     """Mark a failed session for future retry support."""
     if not get_persisted_consultation(session_id):
-        raise HTTPException(status_code=404, detail="Consultation not found")
+        raise HTTPException(
+            status_code=404,
+            detail=make_error_response(
+                "UNKNOWN_ERROR",
+                session_id=session_id,
+                detail="Consultation not found",
+            ),
+        )
     return {"status": "retry_initiated", "session_id": session_id}
 
 
@@ -453,12 +685,12 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "MedScribe API",
-        "version": "0.4.0-phase4"
+        "version": "1.0.0-demo"
     }
 
 
 @router.get("/metrics")
-async def get_metrics():
+async def get_metrics(current_physician: dict = Depends(get_current_physician)):
     """
     Get current system metrics
     
@@ -472,7 +704,11 @@ async def get_metrics():
         }
     except Exception as e:
         logger.error(f"Failed to get metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_code = detect_error_code(str(e))
+        raise HTTPException(
+            status_code=ERROR_CODES[error_code]["http_status"],
+            detail=make_error_response(error_code, detail=str(e)),
+        )
 
 
 # Made with Bob

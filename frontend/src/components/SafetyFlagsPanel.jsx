@@ -1,29 +1,38 @@
 const labels = {
-  drug_interaction: { icon: '💊', label: 'Drug Interaction' },
-  red_flag: { icon: '🚨', label: 'Red Flag Diagnosis' },
-  red_flag_diagnosis: { icon: '🚨', label: 'Red Flag Diagnosis' },
-  dosage: { icon: '⚠️', label: 'Dosage Risk' },
-  dosage_risk: { icon: '⚠️', label: 'Dosage Risk' },
-  system_error: { icon: '⚠️', label: 'System Error' }
+  drug_interaction: { icon: 'Rx', label: 'Drug Interaction' },
+  red_flag: { icon: '!', label: 'Red Flag Diagnosis' },
+  red_flag_diagnosis: { icon: '!', label: 'Red Flag Diagnosis' },
+  dosage: { icon: '!', label: 'Dosage Risk' },
+  dosage_risk: { icon: '!', label: 'Dosage Risk' },
+  allergy_conflict: { icon: '!', label: 'Allergy Conflict' },
+  system_error: { icon: '!', label: 'System Error' }
 }
 
 export default function SafetyFlagsPanel({ safetyResult = {} }) {
   const flags = safetyResult?.safety_flags || []
 
-  if (!flags.length) return null
+  if (!flags.length) {
+    return (
+      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-5 text-sm font-semibold text-emerald-800">
+        No safety risks detected
+      </section>
+    )
+  }
 
   return (
     <section className="rounded-lg border-2 border-red-300 bg-red-50 p-5">
-      <h2 className="text-lg font-bold text-red-950">⚠️ Safety Flags Detected</h2>
+      <h2 className="text-lg font-bold text-red-950">Safety Flags Detected</h2>
       <div className="mt-4 space-y-3">
         {flags.map((flag, index) => {
-          const meta = labels[flag.check_type] || { icon: '⚠️', label: flag.check_type || 'Safety Flag' }
+          const meta = labels[flag.check_type] || { icon: '!', label: flag.check_type || 'Safety Flag' }
           const urgent = flag.urgency === 'urgent'
           return (
             <article key={`${flag.detail}-${index}`} className="rounded-md border border-red-300 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex gap-3">
-                  <span className="text-2xl">{meta.icon}</span>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-sm font-bold text-red-700">
+                    {meta.icon}
+                  </span>
                   <div>
                     <h3 className="font-semibold text-red-950">{meta.label}</h3>
                     <p className="mt-1 text-sm leading-6 text-red-900">{flag.detail}</p>
@@ -41,4 +50,3 @@ export default function SafetyFlagsPanel({ safetyResult = {} }) {
     </section>
   )
 }
-

@@ -22,7 +22,7 @@ export default function ProvenancePanel({ entities = [] }) {
       {open && (
         <div className="mt-4 overflow-x-auto rounded-md border border-slate-200">
           {entities.length === 0 ? (
-            <p className="px-4 py-3 text-sm text-slate-500">No provenance records for this section</p>
+            <p className="px-4 py-3 text-sm text-slate-500">No provenance records available for this section</p>
           ) : (
             <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
               <thead className="bg-slate-50 text-xs uppercase text-slate-500">
@@ -62,4 +62,3 @@ export default function ProvenancePanel({ entities = [] }) {
     </div>
   )
 }
-

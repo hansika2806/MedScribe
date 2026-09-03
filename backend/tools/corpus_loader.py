@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+_collection = None
 
 # Try to import required libraries
 try:
@@ -303,6 +304,10 @@ def load_corpus() -> Optional[Any]:
     if not CORPUS_AVAILABLE:
         logger.error("ChromaDB not available, cannot load corpus")
         return None
+
+    global _collection
+    if _collection is not None:
+        return _collection
     
     try:
         # Create data directory
@@ -323,6 +328,7 @@ def load_corpus() -> Optional[Any]:
             
             if existing_count > 0:
                 logger.info(f"Corpus already loaded with {existing_count} documents")
+                _collection = collection
                 return collection
         except:
             # Collection doesn't exist, create it
@@ -364,15 +370,12 @@ def load_corpus() -> Optional[Any]:
         else:
             logger.warning("No documents to load")
         
+        _collection = collection
         return collection
         
     except Exception as e:
         logger.error(f"Failed to load corpus: {e}")
         return None
-
-
-# Global collection instance
-_collection = None
 
 
 def get_corpus_collection() -> Optional[Any]:

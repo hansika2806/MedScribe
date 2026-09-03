@@ -9,6 +9,8 @@ SCHEMA_STATEMENTS = [
         diarization_method TEXT,
         processing_time_seconds REAL,
         error_message TEXT,
+        patient_context TEXT,
+        physician_username TEXT DEFAULT 'unknown',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         completed_at TIMESTAMP
     )
@@ -100,6 +102,9 @@ SCHEMA_STATEMENTS = [
         lab_name TEXT,
         value TEXT,
         unit TEXT,
+        reference_range TEXT,
+        display_name TEXT,
+        interpretation TEXT,
         source TEXT,
         verified INTEGER,
         flag TEXT,
@@ -107,5 +112,22 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY(session_id) REFERENCES consultations(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        physician_username TEXT,
+        physician_name TEXT,
+        approved_at TIMESTAMP,
+        FOREIGN KEY(session_id) REFERENCES consultations(id)
+    )
+    """,
 ]
 
+MIGRATION_STATEMENTS = [
+    "ALTER TABLE consultations ADD COLUMN physician_username TEXT DEFAULT 'unknown'",
+    "ALTER TABLE consultations ADD COLUMN patient_context TEXT",
+    "ALTER TABLE lab_values ADD COLUMN reference_range TEXT",
+    "ALTER TABLE lab_values ADD COLUMN display_name TEXT",
+    "ALTER TABLE lab_values ADD COLUMN interpretation TEXT",
+]

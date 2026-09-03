@@ -2,6 +2,7 @@ from groq import Groq
 from backend.config import get_settings
 import logging
 import json
+import os
 import re
 from typing import Optional
 
@@ -12,12 +13,16 @@ settings = get_settings()
 class LLMService:
     """Groq API client for LLM calls"""
     
-    def __init__(self):
-        self.client = Groq(api_key=settings.groq_api_key)
+    def __init__(self, timeout: int = 60):
+        self.client = Groq(
+            api_key=settings.groq_api_key,
+            timeout=timeout
+        )
         self.model = settings.llm_model
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
-        logger.info(f"Initialized Groq client with model: {self.model}")
+        self.timeout = timeout
+        logger.info(f"Initialized Groq client with model: {self.model}, timeout: {timeout}s")
     
     def generate(
         self,
@@ -113,8 +118,24 @@ class LLMService:
             raise
 
 
+class GuardrailLLMService(LLMService):
+    """Fast Groq client for guardrail checks."""
+
+    def __init__(self, timeout: int = 30):
+        self.client = Groq(
+            api_key=os.getenv("GROQ_API_KEY") or settings.groq_api_key,
+            timeout=timeout
+        )
+        self.model = settings.guardrail_model
+        self.temperature = settings.llm_temperature
+        self.max_tokens = 500
+        self.timeout = timeout
+        logger.info(f"Initialized guardrail Groq client with model: {self.model}, timeout: {timeout}s")
+
+
 # Singleton instance
 _llm_service = None
+_guardrail_llm = None
 
 
 def get_llm_service() -> LLMService:
@@ -123,5 +144,13 @@ def get_llm_service() -> LLMService:
     if _llm_service is None:
         _llm_service = LLMService()
     return _llm_service
+
+
+def get_guardrail_llm() -> GuardrailLLMService:
+    """Get or create fast guardrail LLM service."""
+    global _guardrail_llm
+    if _guardrail_llm is None:
+        _guardrail_llm = GuardrailLLMService()
+    return _guardrail_llm
 
 # Made with Bob

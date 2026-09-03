@@ -28,11 +28,16 @@ def _normalize_ocr_lab_values(lab_values: dict) -> dict:
     for lab_name, lab_data in lab_values.items():
         if not isinstance(lab_data, dict):
             continue
+        value = str(lab_data.get("value", ""))
         normalized[lab_name] = {
-            "value": str(lab_data.get("value", "")),
+            "value": value,
             "source": "ocr_only",
-            "verified": bool(lab_data.get("verified", True)),
+            "verified": bool(value.strip()),
             "flag": lab_data.get("flag"),
+            "unit": lab_data.get("unit"),
+            "reference_range": lab_data.get("reference_range"),
+            "display_name": lab_data.get("display_name"),
+            "interpretation": lab_data.get("interpretation") or lab_data.get("flag"),
         }
     return normalized
 

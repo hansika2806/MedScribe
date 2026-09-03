@@ -1,0 +1,9 @@
+﻿# Install system dependencies (ffmpeg for audio processing)
+[phases.setup]
+aptPkgs = ["ffmpeg", "libpq-dev", "gcc", "g++"]
+
+[phases.install]
+cmds = ["pip install -r backend/requirements.txt", "pip install aiofiles gunicorn asyncpg"]
+
+[start]
+cmd = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"

@@ -29,17 +29,28 @@ class MetricsTracker:
     def _load_metrics(self):
         """Load metrics from file or initialize"""
         try:
+            default_metrics = self._initialize_metrics()
             if self.metrics_file.exists():
                 with open(self.metrics_file, 'r') as f:
                     self.metrics = json.load(f)
+                self._merge_metric_defaults(self.metrics, default_metrics)
+                self._save_metrics()
                 logger.info("Loaded existing metrics")
             else:
-                self.metrics = self._initialize_metrics()
+                self.metrics = default_metrics
                 self._save_metrics()
                 logger.info("Initialized new metrics")
         except Exception as e:
             logger.error(f"Failed to load metrics: {e}")
             self.metrics = self._initialize_metrics()
+
+    def _merge_metric_defaults(self, current: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+        """Backfill new metric keys into older metrics files."""
+        for key, default_value in defaults.items():
+            if key not in current:
+                current[key] = default_value
+            elif isinstance(current[key], dict) and isinstance(default_value, dict):
+                self._merge_metric_defaults(current[key], default_value)
     
     def _initialize_metrics(self) -> Dict[str, Any]:
         """Initialize empty metrics structure"""
@@ -69,10 +80,35 @@ class MetricsTracker:
         }
     
     def _save_metrics(self):
-        """Save metrics to file"""
+        """Save metrics to file atomically"""
         try:
-            with open(self.metrics_file, 'w') as f:
-                json.dump(self.metrics, f, indent=2)
+            import tempfile
+            import os
+            
+            # Write to temporary file first
+            temp_fd, temp_path = tempfile.mkstemp(
+                dir=self.metrics_file.parent,
+                prefix='.metrics_',
+                suffix='.tmp'
+            )
+            
+            try:
+                with os.fdopen(temp_fd, 'w') as f:
+                    json.dump(self.metrics, f, indent=2)
+                
+                # Atomic rename (on Windows, need to remove target first)
+                if os.path.exists(self.metrics_file):
+                    os.replace(temp_path, self.metrics_file)
+                else:
+                    os.rename(temp_path, self.metrics_file)
+            except Exception:
+                # Clean up temp file on error
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+                raise
+                
         except Exception as e:
             logger.error(f"Failed to save metrics: {e}")
     
@@ -116,8 +152,9 @@ class MetricsTracker:
                     )
                     
                     # Diarization method
-                    if diarization_method in self.metrics["diarization_method_used"]:
-                        self.metrics["diarization_method_used"][diarization_method] += 1
+                    if diarization_method not in self.metrics["diarization_method_used"]:
+                        self.metrics["diarization_method_used"][diarization_method] = 0
+                    self.metrics["diarization_method_used"][diarization_method] += 1
                     
                     # Confidence distribution
                     if confidence >= 0.85:

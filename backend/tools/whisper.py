@@ -1,64 +1,91 @@
-from faster_whisper import WhisperModel
-from backend.config import get_settings
 import logging
+import os
+import io
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+from backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-class WhisperTranscriber:
-    """faster-whisper transcription service"""
-    
+class GroqWhisperTranscriber:
+    """
+    Fast transcription via Groq's Whisper API.
+    Processes a 15-min audio in ~3 seconds vs ~90s local CPU.
+    """
+
     def __init__(self):
-        logger.info(f"Loading Whisper model: {settings.whisper_model}")
-        self.model = WhisperModel(
-            settings.whisper_model,
-            device=settings.whisper_device,
-            compute_type=settings.whisper_compute_type
-        )
-        logger.info(f"Whisper model loaded successfully")
-    
-    def transcribe(self, audio_path: str) -> str:
+        from groq import Groq
+        self.client = Groq(api_key=settings.groq_api_key)
+        self.model = "whisper-large-v3-turbo"
+        logger.info("GroqWhisperTranscriber ready (model: %s)", self.model)
+
+    def transcribe_with_segments(self, audio_path: str) -> tuple[str, list[dict]]:
         """
-        Transcribe audio file to text
-        
-        Args:
-            audio_path: Path to audio file
-            
+        Transcribe audio via Groq API with verbose_json for timestamps.
+
         Returns:
-            Transcribed text
+            (transcript_text, list of {start, end, text} segment dicts)
         """
-        logger.info(f"Transcribing audio: {audio_path}")
-        
-        segments, info = self.model.transcribe(
-            audio_path,
+        logger.info("Transcribing via Groq API: %s", audio_path)
+
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+
+        # Use the filename so Groq can infer the codec
+        filename = os.path.basename(audio_path)
+
+        response = self.client.audio.transcriptions.create(
+            model=self.model,
+            file=(filename, audio_bytes),
+            response_format="verbose_json",
             language="en",
-            beam_size=5
+            timestamp_granularities=["segment"],
         )
-        
-        # Collect all segments
-        transcript_parts = []
-        for segment in segments:
-            transcript_parts.append(segment.text.strip())
-        
-        transcript = " ".join(transcript_parts)
-        
-        logger.info(f"Transcription complete. Language: {info.language}, "
-                   f"Probability: {info.language_probability:.2f}, "
-                   f"Length: {len(transcript)} chars")
-        
+
+        # Build segment list from Groq verbose_json response
+        segments = []
+        if hasattr(response, "segments") and response.segments:
+            for seg in response.segments:
+                segments.append({
+                    "start": float(seg.get("start", 0.0) if isinstance(seg, dict) else seg.start),
+                    "end":   float(seg.get("end",   0.0) if isinstance(seg, dict) else seg.end),
+                    "text":  (seg.get("text", "")  if isinstance(seg, dict) else seg.text).strip(),
+                })
+
+        transcript = response.text.strip() if hasattr(response, "text") else ""
+
+        # Fallback: if no segments returned, split text into sentence chunks
+        if not segments and transcript:
+            sentences = [s.strip() for s in transcript.replace("?", ".").replace("!", ".").split(".") if s.strip()]
+            for i, sentence in enumerate(sentences):
+                segments.append({"start": float(i), "end": float(i + 1), "text": sentence})
+
+        logger.info(
+            "Groq transcription complete: %d chars, %d segments",
+            len(transcript), len(segments),
+        )
+        return transcript, segments
+
+    def transcribe(self, audio_path: str) -> str:
+        transcript, _ = self.transcribe_with_segments(audio_path)
         return transcript
 
 
-# Singleton instance
+# ---------------------------------------------------------------------------
+# Singleton — one instance shared for the lifetime of the process
+# ---------------------------------------------------------------------------
 _transcriber = None
 
 
-def get_transcriber() -> WhisperTranscriber:
-    """Get or create WhisperTranscriber instance"""
+def get_transcriber() -> GroqWhisperTranscriber:
+    """Get or create the Groq transcriber singleton."""
     global _transcriber
     if _transcriber is None:
-        _transcriber = WhisperTranscriber()
+        _transcriber = GroqWhisperTranscriber()
     return _transcriber
 
 # Made with Bob

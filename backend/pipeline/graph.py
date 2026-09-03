@@ -7,8 +7,6 @@ from backend.pipeline.nodes.rag import rag_node
 from backend.pipeline.nodes.icd10_node import icd10_node
 from backend.pipeline.nodes.qa_guardrail import qa_guardrail
 from backend.pipeline.nodes.safety_guardrail import safety_guardrail
-from backend.tools.whisper import get_transcriber
-from backend.tools.diarization import diarize
 from backend.logging_config import get_performance_logger
 import logging
 import time
@@ -64,6 +62,10 @@ def _node_metric_sizes(state: PipelineState, node_name: str) -> tuple[int, int]:
 
 def _with_performance_logging(node_name: str, node_func):
     def wrapped(state: PipelineState) -> PipelineState:
+        if state.get("error"):
+            # Short-circuit if an error already occurred in a previous node
+            return state
+
         start_time = time.time()
         starting_error = state.get("error")
         try:
@@ -99,27 +101,41 @@ def transcribe_and_diarize_node(state: PipelineState) -> PipelineState:
     """
     Node 2: Transcribe audio with faster-whisper and apply diarization
     
-    Tries real diarization (Speechbrain) first, falls back to alternating
+    Tries pyannote diarization first, then Speechbrain, then fallback.
     """
     logger.info("Node 2: Transcribing audio with faster-whisper...")
     try:
+        from backend.tools.whisper import get_transcriber
+        from backend.tools.diarization import diarize
+
         transcriber = get_transcriber()
-        state["transcript_raw"] = transcriber.transcribe(state["audio_path"])
+        transcript_raw, transcript_segments = transcriber.transcribe_with_segments(state["audio_path"])
+        state["transcript_raw"] = transcript_raw
+        state["transcript_segments"] = transcript_segments
         logger.info(f"Transcription complete: {len(state['transcript_raw'])} characters")
         
-        # Apply diarization (tries Speechbrain, falls back to alternating)
+        # Apply diarization (pyannote primary, Speechbrain secondary, fallback last)
         logger.info("Applying diarization...")
         diarized = diarize(
             state["audio_path"],
-            state["transcript_raw"]
+            state["transcript_raw"],
+            state.get("transcript_segments", []),
         )
         state["transcript_diarized"] = diarized
         
         # Track which method was used
-        if diarized.source == "whisper" and diarized.diarization_available:
-            state["diarization_method"] = "speechbrain"
+        if diarized.diarization_available and diarized.utterances:
+            first_timestamp = diarized.utterances[0].timestamp
+            state["diarization_method"] = first_timestamp.split("|", 1)[0] if "|" in first_timestamp else "speechbrain"
         else:
             state["diarization_method"] = "fallback"
+
+        if state["diarization_method"] == "pyannote":
+            logger.info("Using pyannote diarization")
+        elif state["diarization_method"] == "speechbrain":
+            logger.info("Using Speechbrain diarization")
+        else:
+            logger.info("Using fallback diarization")
         
         logger.info(f"Diarization complete: {len(diarized.utterances)} utterances (method: {state['diarization_method']})")
         
@@ -179,7 +195,10 @@ def route_after_safety(state: PipelineState) -> str:
         "urgent_handoff" if safety flags exist
         "confidence_router" otherwise
     """
-    safety_result = state.get("safety_result", {})
+    safety_result = state.get("safety_result") or {}
+    if state.get("error"):
+        logger.warning("Routing to review_handoff via confidence_router due to pipeline error: %s", state.get("error"))
+        return "confidence_router"
     if not safety_result.get("safety_pass", True):
         logger.warning("Routing to urgent_handoff due to safety flags")
         return "urgent_handoff"
@@ -194,11 +213,17 @@ def route_after_confidence(state: PipelineState) -> str:
         "output" if high confidence and QA passed
         "review_handoff" otherwise
     """
-    qa_result = state.get("qa_result", {})
+    from backend.constants import CONFIDENCE_HIGH
+
+    if state.get("error"):
+        logger.warning("Routing to review_handoff due to pipeline error: %s", state.get("error"))
+        return "review_handoff"
+
+    qa_result = state.get("qa_result") or {}
     overall_confidence = qa_result.get("overall_confidence", 0.0)
     qa_pass = qa_result.get("pass", False)
     
-    if overall_confidence >= 0.85 and qa_pass:
+    if overall_confidence >= CONFIDENCE_HIGH and qa_pass:
         logger.info("Routing to output - high confidence")
         return "output"
     else:
@@ -219,7 +244,7 @@ def build_pipeline():
     Build Phase 2 LangGraph pipeline
     
     Flow:
-    1. Node 2: Transcribe & Diarize (faster-whisper + Speechbrain/fallback)
+    1. Node 2: Transcribe & Diarize (faster-whisper + pyannote/Speechbrain/fallback)
     2. Node 7: Filter (Clinical Relevance Filter)
     3. Node 8: Extract (Clinical Extractor)
     4. Node 10: RAG (Retrieve clinical guidelines)

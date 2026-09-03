@@ -15,6 +15,9 @@ structured SOAP notes for hospital physicians in Indian hospital settings.
 TASK:
 Using extracted clinical entities, generate a complete SOAP note with full 
 entity-level provenance.
+Use physician-entered patient context as intake context when provided. Do not
+claim it was said in the transcript; mark its provenance as source "transcript"
+only when it is also supported by transcript evidence.
 
 S — SUBJECTIVE:
 Patient-reported symptoms and duration.
@@ -439,7 +442,9 @@ def soap_generator(state: PipelineState) -> PipelineState:
     logger.info(f"   Retrieved guidelines: {len(guidelines)}")
     
     # Format entities for LLM
+    patient_context = state.get("patient_context", {}) or {}
     entities_text = f"""
+Patient Context: {_compact_json(patient_context)}
 Symptoms: {_compact_json(_limit_items(entities.symptoms))}
 Medications: {_compact_json(_limit_items(entities.medications))}
 Vitals: {_compact_json(_limit_items(entities.vitals))}

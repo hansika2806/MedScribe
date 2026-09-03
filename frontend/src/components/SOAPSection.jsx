@@ -11,22 +11,54 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function HighlightedContent({ content = '', uncertainSpans = [] }) {
-  const spans = uncertainSpans.map((span) => span.text).filter(Boolean)
-  if (!spans.length) return <p className="whitespace-pre-wrap leading-7 text-slate-800">{content}</p>
+function uniqueTerms(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+}
 
-  const pattern = new RegExp(`(${spans.map(escapeRegExp).join('|')})`, 'gi')
+function normalizeSafetyAlerts(values = []) {
+  const byTerm = new Map()
+  values.forEach((value) => {
+    const term = String(value?.term || '').trim()
+    if (!term) return
+    byTerm.set(term.toLowerCase(), {
+      ...value,
+      term
+    })
+  })
+  return [...byTerm.values()].sort((a, b) => b.term.length - a.term.length)
+}
+
+function HighlightedContent({ content = '', uncertainSpans = [], safetyAlerts = [] }) {
+  const spans = uniqueTerms(uncertainSpans.map((span) => span.text))
+  const alerts = normalizeSafetyAlerts(safetyAlerts)
+  const alertTerms = alerts.map((alert) => alert.term)
+  const terms = uniqueTerms([...alertTerms, ...spans])
+  if (!terms.length) return <p className="whitespace-pre-wrap leading-7 text-slate-800">{content}</p>
+
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'gi')
   const parts = content.split(pattern)
   return (
     <p className="whitespace-pre-wrap leading-7 text-slate-800">
       {parts.map((part, index) => {
-        const match = spans.some((span) => span.toLowerCase() === part.toLowerCase())
-        return match ? (
-          <mark key={`${part}-${index}`} className="rounded bg-amber-200 px-1 text-amber-950">
+        const lowerPart = part.toLowerCase()
+        const safetyAlert = alerts.find((alert) => alert.term.toLowerCase() === lowerPart)
+        const uncertainMatch = spans.some((span) => span.toLowerCase() === lowerPart)
+        if (!safetyAlert && !uncertainMatch) {
+          return <span key={`${part}-${index}`}>{part}</span>
+        }
+        return (
+          <mark
+            key={`${part}-${index}`}
+            className={`rounded px-1 ${
+              safetyAlert
+                ? 'bg-red-200 text-red-950 ring-1 ring-red-300'
+                : 'bg-amber-200 text-amber-950'
+            }`}
+            title={safetyAlert ? safetyAlert.detail : 'Low confidence span'}
+          >
             {part}
           </mark>
-        ) : (
-          <span key={`${part}-${index}`}>{part}</span>
         )
       })}
     </p>
@@ -40,12 +72,17 @@ export default function SOAPSection({
   confidence,
   entities = [],
   uncertain_spans = [],
+  safetyAlerts = [],
   diagnoses = [],
   icd10Codes = [],
   guidelineCitations = [],
   retrievedGuidelines = []
 }) {
   const meta = confidenceMeta(confidence)
+  const contentLower = String(content || '').toLowerCase()
+  const visibleSafetyAlerts = sectionKey === 'plan'
+    ? normalizeSafetyAlerts(safetyAlerts).filter((alert) => contentLower.includes(alert.term.toLowerCase()))
+    : []
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
@@ -57,7 +94,27 @@ export default function SOAPSection({
       </div>
 
       <div className="mt-4">
-        <HighlightedContent content={content} uncertainSpans={uncertain_spans} />
+        {visibleSafetyAlerts.length > 0 && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {visibleSafetyAlerts.map((alert) => (
+              <span
+                key={`${alert.term}-${alert.detail}`}
+                className="inline-flex max-w-full items-center gap-2 rounded-md border border-red-300 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-900"
+                title={alert.detail}
+              >
+                <span className="shrink-0 rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
+                  {alert.urgency === 'urgent' ? 'urgent' : 'review'}
+                </span>
+                <span className="truncate">{alert.term}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <HighlightedContent
+          content={content}
+          uncertainSpans={uncertain_spans}
+          safetyAlerts={visibleSafetyAlerts}
+        />
       </div>
 
       {sectionKey === 'assessment' && diagnoses.length > 0 && (
@@ -88,4 +145,3 @@ export default function SOAPSection({
     </section>
   )
 }
-

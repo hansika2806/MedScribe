@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator
 
-from backend.database.models import SCHEMA_STATEMENTS
+from backend.database.models import MIGRATION_STATEMENTS, SCHEMA_STATEMENTS
 
 DATABASE_PATH = Path("data/medscribe.db")
 
@@ -23,6 +23,12 @@ def init_db() -> None:
     with get_connection() as conn:
         for statement in SCHEMA_STATEMENTS:
             conn.execute(statement)
+        for statement in MIGRATION_STATEMENTS:
+            try:
+                conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
         conn.commit()
 
 
@@ -37,4 +43,3 @@ def connection_scope() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
-

@@ -16,9 +16,11 @@ class PipelineState(TypedDict, total=False):
     ocr_result: Dict[str, Any]
     ocr_method: str
     test_report_values: Dict[str, Any]
+    patient_context: Dict[str, Any]
     
     # Transcription (Node 2 & 2b output)
     transcript_raw: Optional[str]
+    transcript_segments: List[Dict[str, Any]]
     transcript_diarized: Optional[DiarizedTranscript]
     
     # Filtering (Node 7 output - Clinical Relevance Filter)

@@ -25,6 +25,173 @@ except ImportError:  # pragma: no cover - allows app startup before install
 logger = logging.getLogger(__name__)
 
 
+LAB_METADATA = {
+    "HbA1c": {
+        "display_name": "HbA1c",
+        "unit": "%",
+        "reference_range": "Goal usually < 7.0% for many adults with diabetes",
+        "high": 7.0,
+    },
+    "Blood_Glucose_Fasting": {
+        "display_name": "Fasting glucose",
+        "unit": "mg/dL",
+        "reference_range": "70-99 mg/dL fasting; diabetes >= 126 mg/dL",
+        "high": 125.0,
+    },
+    "Blood_Glucose_PP": {
+        "display_name": "Post-prandial glucose",
+        "unit": "mg/dL",
+        "reference_range": "< 140 mg/dL 2-hour post-prandial",
+        "high": 139.0,
+    },
+    "Blood_Glucose": {
+        "display_name": "Blood glucose",
+        "unit": "mg/dL",
+        "reference_range": "Context dependent",
+    },
+    "Hemoglobin": {
+        "display_name": "Hemoglobin",
+        "unit": "g/dL",
+        "reference_range": "Approx. 12-17 g/dL, varies by sex and lab",
+    },
+    "Creatinine": {
+        "display_name": "Creatinine",
+        "unit": "mg/dL",
+        "reference_range": "Approx. 0.6-1.3 mg/dL",
+        "high": 1.3,
+    },
+    "Cholesterol_Total": {
+        "display_name": "Total cholesterol",
+        "unit": "mg/dL",
+        "reference_range": "< 200 mg/dL",
+        "high": 199.0,
+    },
+    "HDL": {
+        "display_name": "HDL cholesterol",
+        "unit": "mg/dL",
+        "reference_range": ">= 40 mg/dL; higher is generally protective",
+        "low": 40.0,
+    },
+    "LDL": {
+        "display_name": "LDL cholesterol",
+        "unit": "mg/dL",
+        "reference_range": "< 100 mg/dL for many high-risk adults",
+        "high": 99.0,
+    },
+    "Triglycerides": {
+        "display_name": "Triglycerides",
+        "unit": "mg/dL",
+        "reference_range": "< 150 mg/dL",
+        "high": 149.0,
+    },
+    "Troponin_I": {
+        "display_name": "Troponin I",
+        "unit": "ng/mL",
+        "reference_range": "Lab specific",
+    },
+    "CK_MB": {
+        "display_name": "CK-MB",
+        "unit": "ng/mL",
+        "reference_range": "Lab specific",
+    },
+    "TSH": {
+        "display_name": "TSH",
+        "unit": "uIU/mL",
+        "reference_range": "Approx. 0.4-4.0 uIU/mL",
+    },
+    "Free_T4": {
+        "display_name": "Free T4",
+        "unit": "ng/dL",
+        "reference_range": "Lab specific",
+    },
+    "Insulin_Fasting": {
+        "display_name": "Fasting insulin",
+        "unit": "uIU/mL",
+        "reference_range": "Lab specific",
+    },
+    "Sodium": {
+        "display_name": "Sodium",
+        "unit": "mEq/L",
+        "reference_range": "135-145 mEq/L",
+        "low": 135.0,
+        "high": 145.0,
+    },
+    "Potassium": {
+        "display_name": "Potassium",
+        "unit": "mEq/L",
+        "reference_range": "3.5-5.0 mEq/L",
+        "low": 3.5,
+        "high": 5.0,
+    },
+    "Urea": {
+        "display_name": "Blood urea",
+        "unit": "mg/dL",
+        "reference_range": "Lab specific",
+    },
+    "eGFR": {
+        "display_name": "eGFR",
+        "unit": "mL/min/1.73m2",
+        "reference_range": ">= 60 mL/min/1.73m2",
+        "low": 60.0,
+    },
+    "WBC": {
+        "display_name": "WBC",
+        "unit": "10^3/uL",
+        "reference_range": "Approx. 4.0-11.0 10^3/uL",
+    },
+    "Platelets": {
+        "display_name": "Platelets",
+        "unit": "10^3/uL",
+        "reference_range": "Approx. 150-450 10^3/uL",
+    },
+    "Neutrophils": {
+        "display_name": "Neutrophils",
+        "unit": "%",
+        "reference_range": "Lab specific",
+    },
+    "CRP": {
+        "display_name": "CRP",
+        "unit": "mg/L",
+        "reference_range": "Lab specific",
+    },
+    "ESR": {
+        "display_name": "ESR",
+        "unit": "mm/hr",
+        "reference_range": "Lab specific",
+    },
+    "Procalcitonin": {
+        "display_name": "Procalcitonin",
+        "unit": "ng/mL",
+        "reference_range": "Lab specific",
+    },
+}
+
+
+def _numeric_value(value: str) -> float | None:
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _interpret_lab_value(lab_name: str, value: str) -> str | None:
+    metadata = LAB_METADATA.get(lab_name, {})
+    numeric = _numeric_value(value)
+    if numeric is None:
+        return None
+
+    high = metadata.get("high")
+    low = metadata.get("low")
+    if high is not None and numeric > float(high):
+        return "high"
+    if low is not None and numeric < float(low):
+        return "low"
+    return None
+
+
 class MedicalOCR:
     """Extract report text and common lab values from medical PDFs."""
 
@@ -245,11 +412,18 @@ class MedicalOCR:
             for pattern in pattern_list:
                 match = re.search(pattern, text, re.IGNORECASE)
                 if match:
+                    value = match.group(1)
+                    metadata = LAB_METADATA.get(lab_name, {})
+                    interpretation = _interpret_lab_value(lab_name, value)
                     lab_values[lab_name] = {
-                        "value": match.group(1),
+                        "value": value,
                         "source": "ocr",
                         "verified": True,
-                        "flag": None,
+                        "flag": interpretation,
+                        "interpretation": interpretation,
+                        "unit": metadata.get("unit", ""),
+                        "reference_range": metadata.get("reference_range", ""),
+                        "display_name": metadata.get("display_name", lab_name.replace("_", " ")),
                     }
                     break
 

@@ -14,7 +14,7 @@ export default function ApproveButton({ sessionId, disabled, approved, approvedA
       setError(result.message)
       return
     }
-    onApproved(result.data.approved_at)
+    onApproved(result.data)
   }
 
   return (
@@ -29,7 +29,7 @@ export default function ApproveButton({ sessionId, disabled, approved, approvedA
           type="button"
           disabled={disabled || loading || approved}
           onClick={approve}
-          className={`rounded-md px-5 py-3 text-sm font-bold text-white ${
+          className={`w-full rounded-md px-5 py-3 text-sm font-bold text-white sm:w-auto ${
             approved
               ? 'bg-emerald-700'
               : disabled
@@ -49,4 +49,3 @@ export default function ApproveButton({ sessionId, disabled, approved, approvedA
     </div>
   )
 }
-

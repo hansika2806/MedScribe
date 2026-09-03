@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from backend.database.connection import get_connection, init_db
+from backend.utils import plain_dict
 
 
 @contextmanager
@@ -26,18 +27,6 @@ def _now() -> str:
     return datetime.utcnow().isoformat()
 
 
-def _plain(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    if hasattr(value, "dict"):
-        return value.dict()
-    if isinstance(value, dict):
-        return {k: _plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_plain(item) for item in value]
-    return value
-
-
 def _as_bool_int(value: Any) -> int:
     return 1 if bool(value) else 0
 
@@ -49,9 +38,12 @@ def save_consultation(
     diarization_method: Optional[str] = None,
     processing_time_seconds: Optional[float] = None,
     error_message: Optional[str] = None,
+    patient_context: Optional[Dict[str, Any]] = None,
+    physician_username: Optional[str] = None,
 ) -> None:
     """Create or update a consultation row."""
     completed_at = _now() if status in {"completed", "failed"} else None
+    patient_context_json = json.dumps(plain_dict(patient_context)) if patient_context is not None else None
     with _db() as conn:
         existing = conn.execute(
             "SELECT id, created_at FROM consultations WHERE id = ?",
@@ -66,6 +58,8 @@ def save_consultation(
                     diarization_method = COALESCE(?, diarization_method),
                     processing_time_seconds = COALESCE(?, processing_time_seconds),
                     error_message = ?,
+                    patient_context = COALESCE(?, patient_context),
+                    physician_username = COALESCE(?, physician_username),
                     completed_at = COALESCE(?, completed_at)
                 WHERE id = ?
                 """,
@@ -75,6 +69,8 @@ def save_consultation(
                     diarization_method,
                     processing_time_seconds,
                     error_message,
+                    patient_context_json,
+                    physician_username,
                     completed_at,
                     session_id,
                 ),
@@ -84,9 +80,10 @@ def save_consultation(
                 """
                 INSERT INTO consultations (
                     id, status, review_type, diarization_method,
-                    processing_time_seconds, error_message, created_at, completed_at
+                    processing_time_seconds, error_message, patient_context, physician_username,
+                    created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -95,6 +92,8 @@ def save_consultation(
                     diarization_method,
                     processing_time_seconds,
                     error_message,
+                    patient_context_json,
+                    physician_username or "unknown",
                     _now(),
                     completed_at,
                 ),
@@ -103,7 +102,7 @@ def save_consultation(
 
 def save_soap_note(session_id: str, soap_note_dict: Dict[str, Any]) -> None:
     """Persist the generated SOAP note section content and confidence scores."""
-    soap = _plain(soap_note_dict)
+    soap = plain_dict(soap_note_dict)
     sections = ["subjective", "objective", "assessment", "plan"]
     scores = [float(soap.get(section, {}).get("confidence", 0.0) or 0.0) for section in sections]
     overall = sum(scores) / len(scores) if scores else 0.0
@@ -141,7 +140,7 @@ def save_diagnoses(session_id: str, diagnoses_list: List[Dict[str, Any]]) -> Non
     """Persist diagnosis names and ICD-10 coding results."""
     with _db() as conn:
         conn.execute("DELETE FROM diagnoses WHERE session_id = ?", (session_id,))
-        for item in _plain(diagnoses_list):
+        for item in plain_dict(diagnoses_list):
             code = item.get("code") or item.get("icd10_code") or "PENDING"
             status = "coded" if code and code != "PENDING" else "pending"
             conn.execute(
@@ -166,7 +165,7 @@ def save_provenance(session_id: str, entities_list: List[Dict[str, Any]]) -> Non
     """Persist entity-level provenance records."""
     with _db() as conn:
         conn.execute("DELETE FROM provenance_records WHERE session_id = ?", (session_id,))
-        for item in _plain(entities_list):
+        for item in plain_dict(entities_list):
             conn.execute(
                 """
                 INSERT INTO provenance_records (
@@ -192,7 +191,7 @@ def save_guidelines(session_id: str, guidelines_list: List[Dict[str, Any]]) -> N
     """Persist retrieved guideline snippets."""
     with _db() as conn:
         conn.execute("DELETE FROM retrieved_guidelines WHERE session_id = ?", (session_id,))
-        for item in _plain(guidelines_list):
+        for item in plain_dict(guidelines_list):
             conn.execute(
                 """
                 INSERT INTO retrieved_guidelines (
@@ -215,7 +214,7 @@ def save_guidelines(session_id: str, guidelines_list: List[Dict[str, Any]]) -> N
 
 def save_qa_result(session_id: str, qa_result_dict: Dict[str, Any]) -> None:
     """Persist QA result and flags."""
-    qa = _plain(qa_result_dict or {})
+    qa = plain_dict(qa_result_dict or {})
     section_scores = qa.get("section_scores", {}) or {}
     with _db() as conn:
         conn.execute("DELETE FROM qa_results WHERE session_id = ?", (session_id,))
@@ -243,7 +242,7 @@ def save_qa_result(session_id: str, qa_result_dict: Dict[str, Any]) -> None:
 
 def save_safety_result(session_id: str, safety_result_dict: Dict[str, Any]) -> None:
     """Persist clinical safety result and flags."""
-    safety = _plain(safety_result_dict or {})
+    safety = plain_dict(safety_result_dict or {})
     with _db() as conn:
         conn.execute("DELETE FROM safety_results WHERE session_id = ?", (session_id,))
         conn.execute(
@@ -262,20 +261,24 @@ def save_safety_result(session_id: str, safety_result_dict: Dict[str, Any]) -> N
 def save_lab_values(session_id: str, lab_values_list: List[Dict[str, Any]]) -> None:
     """Persist lab values."""
     with _db() as conn:
-        for item in _plain(lab_values_list):
+        for item in plain_dict(lab_values_list):
             conn.execute(
                 """
                 INSERT INTO lab_values (
-                    session_id, lab_name, value, unit, source,
-                    verified, flag, entered_at
+                    session_id, lab_name, value, unit, reference_range,
+                    display_name, interpretation, source, verified, flag,
+                    entered_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
                     item.get("lab_name") or item.get("name", ""),
                     item.get("value", ""),
                     item.get("unit", ""),
+                    item.get("reference_range", ""),
+                    item.get("display_name", item.get("lab_name") or item.get("name", "")),
+                    item.get("interpretation") or item.get("flag") or "",
                     item.get("source", "manual_physician_entry"),
                     _as_bool_int(item.get("verified", False)),
                     item.get("flag"),
@@ -336,7 +339,12 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
         ).fetchone()
         labs = _fetch_all(
             conn,
-            "SELECT lab_name, value, unit, source, verified, flag, entered_at FROM lab_values WHERE session_id = ?",
+            """
+            SELECT lab_name, value, unit, reference_range, display_name,
+                   interpretation, source, verified, flag, entered_at
+            FROM lab_values
+            WHERE session_id = ?
+            """,
             (session_id,),
         )
 
@@ -417,6 +425,9 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
         item["lab_name"]: {
             "value": item.get("value", ""),
             "unit": item.get("unit", ""),
+            "reference_range": item.get("reference_range", ""),
+            "display_name": item.get("display_name") or item["lab_name"],
+            "interpretation": item.get("interpretation") or item.get("flag") or "",
             "source": item.get("source", "ocr"),
             "verified": bool(item.get("verified")),
             "flag": item.get("flag"),
@@ -424,6 +435,12 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
         for item in labs
         if item.get("source") in {"ocr", "ocr_only"}
     }
+
+    patient_context = {}
+    try:
+        patient_context = json.loads(consultation_data.get("patient_context") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        patient_context = {}
 
     return {
         "session_id": consultation_data["id"],
@@ -453,13 +470,19 @@ def get_consultation(session_id: str) -> Optional[Dict[str, Any]]:
         "lab_values": labs,
         "approved": approved,
         "approved_at": approved_at,
+        "physician_username": consultation_data.get("physician_username"),
+        "patient_context": patient_context,
         "created_at": consultation_data.get("created_at"),
         "completed_at": consultation_data.get("completed_at"),
         "error_message": consultation_data.get("error_message"),
     }
 
 
-def approve_consultation(session_id: str) -> Dict[str, str]:
+def approve_consultation(
+    session_id: str,
+    physician_username: str = "unknown",
+    physician_name: str = "Unknown Physician",
+) -> Dict[str, str]:
     """Mark the latest SOAP note for a consultation as approved."""
     approved_at = _now()
     with _db() as conn:
@@ -471,4 +494,26 @@ def approve_consultation(session_id: str) -> Dict[str, str]:
             """,
             (approved_at, session_id),
         )
-    return {"status": "approved", "approved_at": approved_at}
+        conn.execute(
+            """
+            UPDATE consultations
+            SET physician_username = ?
+            WHERE id = ?
+            """,
+            (physician_username, session_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO approvals (
+                session_id, physician_username, physician_name, approved_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, physician_username, physician_name, approved_at),
+        )
+    return {
+        "status": "approved",
+        "approved_at": approved_at,
+        "approved_by": physician_name,
+        "physician_username": physician_username,
+    }

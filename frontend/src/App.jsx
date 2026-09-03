@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
-import { retryConsultation, submitConsultation } from './api/client'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getPhysician, isLoggedIn, logout } from './api/auth'
+import { getConsultation, retryConsultation, submitConsultation } from './api/client'
+import ApprovalSuccessScreen from './components/ApprovalSuccessScreen'
 import ErrorScreen from './components/ErrorScreen'
+import LoginScreen from './components/LoginScreen'
+import NavBar from './components/NavBar'
 import ProcessingScreen from './components/ProcessingScreen'
 import SOAPReview from './components/SOAPReview'
 import UploadScreen from './components/UploadScreen'
@@ -34,14 +38,23 @@ function clearSession() {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState('upload')
+  const [screen, setScreen] = useState(() => (isLoggedIn() ? 'upload' : 'login'))
   const [responseData, setResponseData] = useState(null)
+  const [approvalData, setApprovalData] = useState(null)
+  const [physician, setPhysician] = useState(() => getPhysician())
   const [sessionId, setSessionId] = useState(null)
   const [error, setError] = useState(null)
   const [lastFile, setLastFile] = useState(null)
   const [lastPdfFile, setLastPdfFile] = useState(null)
+  const [lastPatientContext, setLastPatientContext] = useState({})
+  const completedSessions = useRef(new Set())
 
   useEffect(() => {
+    if (!isLoggedIn()) {
+      setScreen('login')
+      return
+    }
+    setPhysician(getPhysician())
     const stored = sessionStorage.getItem(SESSION_KEY)
     if (!stored) return
 
@@ -57,8 +70,10 @@ export default function App() {
       setResponseData(parsed.response_data)
 
       if (parsed.response_data?.status === 'completed') {
-        setScreen('review')
-        sessionStorage.setItem(SCREEN_KEY, 'review')
+        const storedScreen = sessionStorage.getItem(SCREEN_KEY)
+        const nextScreen = storedScreen === 'success' && parsed.response_data?.approved ? 'success' : 'review'
+        setScreen(nextScreen)
+        sessionStorage.setItem(SCREEN_KEY, nextScreen)
       } else if (parsed.response_data?.status === 'failed') {
         setError({ message: parsed.response_data?.error_message || 'Processing failed.' })
         setScreen('error')
@@ -69,16 +84,54 @@ export default function App() {
     }
   }, [])
 
-  const startProcessing = useCallback(async (file, pdfFile = null) => {
+  useEffect(() => {
+    const handleLogout = () => {
+      clearSession()
+      setResponseData(null)
+      setApprovalData(null)
+      setPhysician(null)
+      setScreen('login')
+    }
+    window.addEventListener('medscribe_logout', handleLogout)
+    return () => window.removeEventListener('medscribe_logout', handleLogout)
+  }, [])
+
+  const handleLogin = (nextPhysician) => {
+    setPhysician(nextPhysician)
+    setScreen('upload')
+  }
+
+  const handleLogout = () => {
+    logout()
+  }
+
+  const startProcessing = useCallback(async (file, pdfFile = null, patientContext = {}) => {
     const nextSessionId = createSessionId()
     setLastFile(file)
     setLastPdfFile(pdfFile)
+    setLastPatientContext(patientContext)
     setSessionId(nextSessionId)
     setError(null)
     setScreen('processing')
     sessionStorage.setItem(SCREEN_KEY, 'processing')
 
-    const result = await submitConsultation(file, pdfFile, nextSessionId)
+    const result = await submitConsultation(file, pdfFile, nextSessionId, patientContext)
+    if (!result.ok) {
+      if (completedSessions.current.has(nextSessionId)) return
+      setError(result)
+      setScreen('error')
+      sessionStorage.setItem(SCREEN_KEY, 'error')
+      return
+    }
+
+    setResponseData(result.data)
+    setScreen('review')
+    saveSession('review', result.data)
+  }, [])
+
+  const handleCompleted = useCallback(async (completedSessionId) => {
+    completedSessions.current.add(completedSessionId)
+    const result = await getConsultation(completedSessionId)
     if (!result.ok) {
       setError(result)
       setScreen('error')
@@ -102,7 +155,7 @@ export default function App() {
       await retryConsultation(sessionId)
     }
     if (lastFile) {
-      startProcessing(lastFile, lastPdfFile)
+      startProcessing(lastFile, lastPdfFile, lastPatientContext)
       return
     }
     setScreen('upload')
@@ -111,10 +164,12 @@ export default function App() {
   const handleUploadNew = () => {
     clearSession()
     setResponseData(null)
+    setApprovalData(null)
     setSessionId(null)
     setError(null)
     setLastFile(null)
     setLastPdfFile(null)
+    setLastPatientContext({})
     setScreen('upload')
   }
 
@@ -123,30 +178,78 @@ export default function App() {
     saveSession('review', updated)
   }
 
+  const handleApproved = (approval) => {
+    const updated = {
+      ...responseData,
+      approved: true,
+      approved_at: approval.approved_at
+    }
+    setApprovalData(approval)
+    setResponseData(updated)
+    saveSession('success', updated)
+    setScreen('success')
+  }
+
+  const viewApprovedNote = () => {
+    setScreen('review')
+  }
+
+  if (screen === 'login') {
+    return <LoginScreen onLogin={handleLogin} />
+  }
+
+  const withNav = (content) => (
+    <>
+      <NavBar physician={physician} onLogout={handleLogout} />
+      {content}
+    </>
+  )
+
   if (screen === 'processing') {
-    return <ProcessingScreen sessionId={sessionId} onFailed={handleFailed} />
+    return withNav(
+      <ProcessingScreen
+        sessionId={sessionId}
+        onCompleted={handleCompleted}
+        onFailed={handleFailed}
+        onCancel={handleUploadNew}
+      />
+    )
   }
 
   if (screen === 'error') {
     return (
-      <ErrorScreen
+      withNav(<ErrorScreen
         error={error}
         sessionId={sessionId}
         onRetry={handleRetry}
         onUploadNew={handleUploadNew}
+      />)
+    )
+  }
+
+  if (screen === 'success' && responseData) {
+    return withNav(
+      <ApprovalSuccessScreen
+        responseData={responseData}
+        approval={approvalData}
+        physician={physician}
+        onStartNew={handleUploadNew}
+        onViewNote={viewApprovedNote}
       />
     )
   }
 
   if (screen === 'review' && responseData) {
-    return (
+    return withNav(
       <SOAPReview
         responseData={responseData}
         onNewConsultation={handleUploadNew}
         onSessionUpdate={handleSessionUpdate}
+        onApproved={handleApproved}
+        physician={physician}
       />
     )
   }
 
-  return <UploadScreen onSubmit={startProcessing} />
+  return withNav(<UploadScreen onSubmit={startProcessing} physician={physician} />)
 }
