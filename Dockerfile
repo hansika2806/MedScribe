@@ -1,20 +1,30 @@
 # MedScribe Backend Dockerfile
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
+
+# Prevent apt from hanging on interactive prompts and configure python environment
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies (Debian Bookworm ensures stable packages without trixie testing transitions)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpq-dev \
     gcc \
     g++ \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY backend/requirements.txt /app/backend/requirements.txt
+
+# Pre-install CPU-only PyTorch to avoid downloading multi-gigabyte CUDA wheels & prevent OOM on cloud builds
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch==2.3.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r backend/requirements.txt
@@ -27,30 +37,22 @@ RUN pip install --no-cache-dir \
     alembic \
     gunicorn \
     uvicorn[standard] \
-    cryptography
+    cryptography \
+    aiofiles
 
-# Copy application code
+# Copy application code (do NOT copy .env: secrets are provided via platform environment variables)
 COPY backend/ /app/backend/
 COPY data/ /app/data/
-COPY .env /app/.env
 
 # Create necessary directories
 RUN mkdir -p /app/data/chroma /app/data/uploads /app/logs
 
-# Expose port
+# Expose port (default 8000, Railway assigns $PORT at runtime)
 EXPOSE 8000
 
-# Health check
+# Health check using urllib (works across custom ports via $PORT)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+    CMD python -c "import os, urllib.request; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/health')"
 
-# Run with gunicorn for production
-CMD ["gunicorn", "backend.main:app", \
-     "--workers", "4", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--timeout", "120", \
-     "--access-logfile", "/app/logs/access.log", \
-     "--error-logfile", "/app/logs/error.log"]
-
-# Made with Bob
+# Run with gunicorn/uvicorn, binding to $PORT provided by Railway (or fallback to 8000)
+CMD ["sh", "-c", "gunicorn backend.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000} --timeout 120 --access-logfile /app/logs/access.log --error-logfile /app/logs/error.log"]
