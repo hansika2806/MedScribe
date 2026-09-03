@@ -19,7 +19,8 @@ export default function LoginScreen({ onLogin }) {
         const detail = err.response.data.detail
         setError(typeof detail === 'string' ? detail : (detail.message || 'Invalid username or password.'))
       } else if (err.code === 'ERR_NETWORK' || !err.response) {
-        setError('Unable to connect to backend server (http://localhost:8001). Please ensure backend is running.')
+        setError(`Unable to connect to the MedScribe server. Please try again in a moment.`)
+
       } else {
         setError('Invalid username or password. Please use one of the demo accounts below.')
       }
