@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://medscribe-production-39ab.up.railway.app'
 const TOKEN_KEY = 'medscribe_token'
 const PHYSICIAN_KEY = 'medscribe_physician'
 
