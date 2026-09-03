@@ -54,5 +54,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import os, urllib.request; port = os.environ.get('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/health')"
 
-# Run with gunicorn/uvicorn, binding to $PORT provided by Railway (or fallback to 8000)
-CMD ["sh", "-c", "gunicorn backend.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000} --timeout 120 --access-logfile /app/logs/access.log --error-logfile /app/logs/error.log"]
+# Run with uvicorn directly, outputting logs to stdout/stderr and binding to $PORT
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+

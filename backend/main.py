@@ -161,15 +161,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware - configurable origins + local dev regex
+# CORS middleware - allow all origins while supporting credentials
 cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"https://[a-zA-Z0-9\-]+\.vercel\.app|https://[a-zA-Z0-9\-]+\.railway\.app|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*", "Authorization"],
+    allow_headers=["*"],
 )
 
 # Include routes with API versioning
@@ -181,8 +181,20 @@ app.include_router(auth_router, prefix="/auth", tags=["Authentication (Deprecate
 app.include_router(router, tags=["Consultations (Deprecated)"])
 
 
+@app.get("/health")
+async def health():
+    """Direct health check - bypasses all router middleware"""
+    return {"status": "healthy", "service": "MedScribe API", "version": "1.0.0-demo"}
+
+
+@app.get("/ping")
+async def ping():
+    return {"pong": True}
+
+
 @app.get("/")
 async def root():
+
     """Root endpoint"""
     return {
         "message": "MedScribe API - Clinical Documentation AI",
